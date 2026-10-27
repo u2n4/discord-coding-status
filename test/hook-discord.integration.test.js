@@ -12,7 +12,7 @@ const {
   waitFor
 } = require('./helpers');
 
-test('multiple active sessions of one tool are visible through a session count marker', async (t) => {
+test('multiple active sessions of one tool converge to a single model line', async (t) => {
   const { env, rpcLogFile } = createTestEnvironment(t);
   const daemon = startDaemon(t, env);
 
@@ -27,22 +27,26 @@ test('multiple active sessions of one tool are visible through a session count m
     '--surface', 'cli',
     '--status', 'running'
   ];
-  await runCli([...base, '--session-id', 'multi-a', '--cwd', process.cwd(), '--activity', 'First alpha session'], env);
-  await runCli([...base, '--session-id', 'multi-b', '--cwd', path.join(process.cwd(), 'scripts'), '--activity', 'Second beta session'], env);
+  await runCli([...base, '--session-id', 'multi-a', '--cwd', process.cwd(), '--model', 'model-alpha'], env);
+  await runCli([...base, '--session-id', 'multi-b', '--cwd', path.join(process.cwd(), 'scripts'), '--model', 'model-beta'], env);
 
   const activity = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.details.includes('👥 2')
+        && event.activity.details === 'Model: model-beta'
     ),
-    'the session count marker to reach Discord RPC'
+    'the newest session model to reach Discord RPC'
   );
-  assert.match(activity.activity.details, /^👥 2 \|/);
-  assert.match(activity.activity.details, /Second beta session/);
+  assert.equal(activity.activity.details, 'Model: model-beta');
+  assert.equal(activity.activity.state, undefined);
+  assert.doesNotMatch(
+    readRpcEvents(rpcLogFile).map((event) => JSON.stringify(event.activity || {})).join('\n'),
+    /👥/
+  );
   assert.equal(daemon.output().stderr, '');
 });
 
-test('activity status is decorated with an emoji on the details line', async (t) => {
+test('hook sessions publish only the model line, never activity or status', async (t) => {
   const { env, rpcLogFile } = createTestEnvironment(t);
   const daemon = startDaemon(t, env);
 
@@ -56,7 +60,7 @@ test('activity status is decorated with an emoji on the details line', async (t)
     '--tool', 'pi',
     '--surface', 'cli',
     '--status', 'thinking',
-    '--session-id', 'emoji-session',
+    '--session-id', 'minimal-session',
     '--cwd', process.cwd(),
     '--model', 'deepseek-v4-flash',
     '--effort', 'high',
@@ -66,12 +70,14 @@ test('activity status is decorated with an emoji on the details line', async (t)
   const activity = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.details.includes('Thinking deeply')
+        && event.activity.details === 'Model: deepseek-v4-flash'
     ),
-    'the emoji-decorated activity to reach Discord RPC'
+    'the model-only activity to reach Discord RPC'
   );
-  assert.match(activity.activity.details, /^[🧠⚡✨⏳✋🛂💤⏸️🐛👾]+ Thinking deeply \|/u);
-  assert.match(activity.activity.state, /^deepseek-v4-flash · high/);
+  assert.equal(activity.activity.details, 'Model: deepseek-v4-flash');
+  assert.equal(activity.activity.state, undefined);
+  assert.equal(activity.activity.startTimestamp, undefined);
+  assert.doesNotMatch(JSON.stringify(activity.activity), /Thinking deeply|high|[🧠⚡✨⏳✋🛂💤⏸️🐛👾]/u);
   assert.equal(daemon.output().stderr, '');
 });
 
@@ -93,23 +99,26 @@ test('hook changes update and clear Discord Rich Presence without waiting for po
     '--cwd', process.cwd()
   ];
 
+  // No model yet: Discord shows the application name with no extra line.
   await runCli([...commonArgs, '--activity', 'Integration first activity'], env);
   const first = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.details.includes('Integration first activity')
     ),
     'the first hook activity to reach Discord RPC'
   );
   assert.equal(first.clientId, '1517375602662051900');
+  assert.equal(first.activity.details, undefined);
+  assert.equal(first.activity.state, undefined);
+  assert.equal(first.activity.startTimestamp, undefined);
 
-  await runCli([...commonArgs, '--activity', 'Integration changed activity'], env);
+  await runCli([...commonArgs, '--model', 'gpt-integration'], env);
   await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.details.includes('Integration changed activity')
+        && event.activity.details === 'Model: gpt-integration'
     ),
-    'the changed hook activity to reach Discord RPC'
+    'the changed hook model to reach Discord RPC'
   );
 
   await runCli(['clear', '--session-id', 'integration-session'], env);
@@ -124,7 +133,7 @@ test('hook changes update and clear Discord Rich Presence without waiting for po
   assert.equal(daemon.output().stderr, '');
 });
 
-test('Codex hook shows the active model and reasoning effort from transcript metadata', async (t) => {
+test('Codex hook shows the raw model without reasoning effort', async (t) => {
   const { directory, env, rpcLogFile } = createTestEnvironment(t);
   const transcriptPath = path.join(directory, 'codex-session.jsonl');
   fs.writeFileSync(transcriptPath, `${JSON.stringify({
@@ -147,7 +156,7 @@ test('Codex hook shows the active model and reasoning effort from transcript met
     15000,
     JSON.stringify({
       hook_event_name: 'UserPromptSubmit',
-      session_id: 'model-effort-session',
+      session_id: 'model-session',
       cwd: process.cwd(),
       transcript_path: transcriptPath,
       model: 'gpt-5.6-sol',
@@ -158,25 +167,26 @@ test('Codex hook shows the active model and reasoning effort from transcript met
   const activity = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.state.includes('gpt-5.6-sol · xhigh')
+        && event.activity.details === 'Model: gpt-5.6-sol'
     ),
-    'the model and reasoning effort to reach Discord RPC'
+    'the raw model to reach Discord RPC'
   );
-  assert.match(activity.activity.state, /^gpt-5\.6-sol · xhigh \|/);
+  assert.equal(activity.activity.details, 'Model: gpt-5.6-sol');
+  assert.doesNotMatch(JSON.stringify(activity.activity), /xhigh/);
 
   const stateResult = await runCli(['state'], env);
   const state = JSON.parse(stateResult.stdout);
-  assert.equal(state.sessions['model-effort-session'].model, 'gpt-5.6-sol');
-  assert.equal(state.sessions['model-effort-session'].effort, 'xhigh');
+  assert.equal(state.sessions['model-session'].model, 'gpt-5.6-sol');
+  assert.equal(state.sessions['model-session'].effort, 'xhigh');
   assert.equal(daemon.output().stderr, '');
 });
 
-test('display layout can hide blocks while showing project, context, and package', async (t) => {
+test('display toggles cannot enable extra blocks', async (t) => {
   const { env, rpcLogFile } = createTestEnvironment(t, {
-    DISCORD_CODING_STATUS_SHOW_ACTIVITY: 'false',
+    DISCORD_CODING_STATUS_SHOW_ACTIVITY: 'true',
     DISCORD_CODING_STATUS_SHOW_PROJECT: 'true',
-    DISCORD_CODING_STATUS_SHOW_MODEL: 'false',
-    DISCORD_CODING_STATUS_SHOW_QUOTA: 'false',
+    DISCORD_CODING_STATUS_SHOW_MODEL: 'true',
+    DISCORD_CODING_STATUS_SHOW_QUOTA: 'true',
     DISCORD_CODING_STATUS_SHOW_CONTEXT: 'true',
     DISCORD_CODING_STATUS_SHOW_PACKAGE: 'true'
   });
@@ -197,7 +207,7 @@ test('display layout can hide blocks while showing project, context, and package
     '--activity', 'This activity must be hidden',
     '--project', 'display-project',
     '--package', 'display-package',
-    '--model', 'gpt-hidden',
+    '--model', 'gpt-minimal',
     '--effort', 'xhigh',
     '--context', '42%'
   ], env);
@@ -205,14 +215,17 @@ test('display layout can hide blocks while showing project, context, and package
   const event = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (candidate) => candidate.method === 'setActivity'
-        && candidate.activity.details.includes('display-project')
     ),
-    'the custom display layout to reach Discord RPC'
+    'the minimal display to reach Discord RPC'
   );
 
-  assert.doesNotMatch(event.activity.details, /This activity must be hidden/);
-  assert.match(event.activity.state, /^ctx 42% \| pkg display-package$/);
-  assert.doesNotMatch(event.activity.state, /gpt-hidden|quota/i);
+  assert.equal(event.activity.details, 'Model: gpt-minimal');
+  assert.equal(event.activity.state, undefined);
+  assert.equal(event.activity.startTimestamp, undefined);
+  assert.doesNotMatch(
+    JSON.stringify(event.activity),
+    /This activity must be hidden|display-project|display-package|42%|xhigh/
+  );
   assert.equal(daemon.output().stderr, '');
 });
 
@@ -262,7 +275,8 @@ test('only the most recently updated session is submitted; older tools are clear
       cwd: process.cwd(),
       updated_at: older,
       started_at: older,
-      activity: 'Older codex session'
+      activity: 'Older codex session',
+      model: 'codex-model-old'
     }
   });
 
@@ -270,7 +284,7 @@ test('only the most recently updated session is submitted; older tools are clear
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
         && event.clientId === '1517375602662051900'
-        && event.activity.details.includes('Older codex session')
+        && event.activity.details === 'Model: codex-model-old'
     ),
     'the first codex session to reach Discord RPC'
   );
@@ -285,7 +299,8 @@ test('only the most recently updated session is submitted; older tools are clear
       cwd: process.cwd(),
       updated_at: older,
       started_at: older,
-      activity: 'Older codex session'
+      activity: 'Older codex session',
+      model: 'codex-model-old'
     },
     'opencode-new': {
       tool: 'opencode',
@@ -295,7 +310,8 @@ test('only the most recently updated session is submitted; older tools are clear
       cwd: process.cwd(),
       updated_at: newer,
       started_at: newer,
-      activity: 'Newer opencode session'
+      activity: 'Newer opencode session',
+      model: 'opencode-model-new'
     }
   });
 
@@ -303,7 +319,7 @@ test('only the most recently updated session is submitted; older tools are clear
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
         && event.clientId === '1538957549364322404'
-        && event.activity.details.includes('Newer opencode session')
+        && event.activity.details === 'Model: opencode-model-new'
     ),
     'the newest opencode session to reach Discord RPC'
   );
@@ -320,12 +336,12 @@ test('only the most recently updated session is submitted; older tools are clear
   assert.equal(daemon.output().stderr, '');
 });
 
-test('context display rejects free-form text instead of exposing it to Discord', async (t) => {
+test('context and activity text never reach Discord', async (t) => {
   const { env, rpcLogFile } = createTestEnvironment(t, {
-    DISCORD_CODING_STATUS_SHOW_MODEL: 'false',
-    DISCORD_CODING_STATUS_SHOW_QUOTA: 'false',
+    DISCORD_CODING_STATUS_SHOW_MODEL: 'true',
+    DISCORD_CODING_STATUS_SHOW_QUOTA: 'true',
     DISCORD_CODING_STATUS_SHOW_CONTEXT: 'true',
-    DISCORD_CODING_STATUS_SHOW_PACKAGE: 'false'
+    DISCORD_CODING_STATUS_SHOW_PACKAGE: 'true'
   });
   const daemon = startDaemon(t, env);
 
@@ -341,18 +357,19 @@ test('context display rejects free-form text instead of exposing it to Discord',
     '--session-id', 'private-context-session',
     '--cwd', process.cwd(),
     '--activity', 'Context privacy check',
+    '--model', 'gpt-private',
     '--context', 'secret prompt text 42%'
   ], env);
 
   const event = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (candidate) => candidate.method === 'setActivity'
-        && candidate.activity.details.includes('Context privacy check')
     ),
-    'the sanitized context activity to reach Discord RPC'
+    'the model-only activity to reach Discord RPC'
   );
 
+  assert.equal(event.activity.details, 'Model: gpt-private');
   assert.equal(event.activity.state, undefined);
-  assert.doesNotMatch(JSON.stringify(event.activity), /secret prompt text/);
+  assert.doesNotMatch(JSON.stringify(event.activity), /secret prompt text|Context privacy check/);
   assert.equal(daemon.output().stderr, '');
 });

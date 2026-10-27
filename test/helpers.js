@@ -9,6 +9,24 @@ const ROOT = path.resolve(__dirname, '..');
 const CLI = path.join(ROOT, 'dist', 'cli.js');
 const RPC_MOCK = path.join(__dirname, 'fixtures', 'mock-discord-rpc.cjs');
 
+function isTmpPath(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    return false;
+  }
+  try {
+    const tmp = path.resolve(os.tmpdir());
+    const target = path.resolve(value);
+    if (process.platform === 'win32') {
+      const lowerTmp = tmp.toLowerCase();
+      const lowerTarget = target.toLowerCase();
+      return lowerTarget === lowerTmp || lowerTarget.startsWith(lowerTmp + path.sep);
+    }
+    return target === tmp || target.startsWith(tmp + path.sep);
+  } catch (_) {
+    return false;
+  }
+}
+
 function createTestEnvironment(t, overrides = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'discord-coding-status-'));
   const stateFile = path.join(directory, 'states.json');
@@ -36,6 +54,38 @@ function createTestEnvironment(t, overrides = {}) {
     DISCORD_CODING_STATUS_RPC_LOG_FILE: rpcLogFile,
     ...overrides
   };
+
+  // Home/config/install isolation plus the daemon-lifecycle seam. Applied
+  // AFTER overrides so a test can never silently point the suite back at the
+  // live home, config, install dir, or scheduled task. An explicit override is
+  // honored only when it already points inside the OS tmpdir (hook tests use a
+  // second tmpdir for HOME); anything else, including values inherited from
+  // process.env, is replaced with this test's own directory. The lifecycle
+  // seam (dummy task name + skip flag) and the RPC/state paths are always
+  // forced: no test has a reason to run the production lifecycle.
+  const isolation = {
+    HOME: directory,
+    USERPROFILE: directory,
+    LOCALAPPDATA: directory,
+    APPDATA: directory,
+    XDG_CONFIG_HOME: path.join(directory, '.config'),
+    XDG_DATA_HOME: path.join(directory, '.local', 'share'),
+    CODEX_HOME: path.join(directory, '.codex'),
+    CLAUDE_CONFIG_DIR: path.join(directory, '.claude'),
+    DISCORD_CODING_STATUS_CONFIG_DIR: path.join(directory, 'dcs-config'),
+    DISCORD_CODING_STATUS_GROK_HOOKS_DIR: path.join(directory, 'grok-hooks')
+  };
+  for (const [key, isolated] of Object.entries(isolation)) {
+    if (typeof env[key] === 'string' && env[key] && isTmpPath(env[key])) {
+      continue;
+    }
+    env[key] = isolated;
+  }
+  env.NODE_OPTIONS = nodeOptions;
+  env.DISCORD_CODING_STATUS_STATE_FILE = stateFile;
+  env.DISCORD_CODING_STATUS_RPC_LOG_FILE = rpcLogFile;
+  env.DISCORD_CODING_STATUS_TASK_NAME = `DCS-Test-${process.pid}`;
+  env.DISCORD_CODING_STATUS_SKIP_DAEMON_RESTART = '1';
 
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   return { directory, env, rpcLogFile, stateFile };

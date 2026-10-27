@@ -73,6 +73,92 @@ export function installMacLaunchAgent(
   return plistPath;
 }
 
+export interface WindowsLauncherPaths {
+  commandPath: string;
+  hiddenPath: string;
+}
+
+export function windowsLauncherPaths(installDirectory: string, appId: string): WindowsLauncherPaths {
+  return {
+    commandPath: path.join(installDirectory, 'run-daemon.cmd'),
+    hiddenPath: path.join(installDirectory, `${appId}.vbs`)
+  };
+}
+
+/**
+ * Carries the Windows launchers across a runtime-directory replacement.
+ *
+ * `copyRuntimeToInstallDir` swaps the whole install directory, which would
+ * otherwise delete `run-daemon.cmd` and the hidden `.vbs` the scheduled task
+ * points at (this is how `hooks setup` broke the task with LastTaskResult=1).
+ * Full `setup` rewrites both files afterwards via `installStartup`; this
+ * preservation keeps every other runtime-copy path runnable too.
+ */
+export function preserveWindowsLaunchers(
+  installDirectory: string,
+  tempDirectory: string,
+  appId: string
+): void {
+  const current = windowsLauncherPaths(installDirectory, appId);
+  const next = windowsLauncherPaths(tempDirectory, appId);
+
+  for (const [source, target] of [
+    [current.commandPath, next.commandPath],
+    [current.hiddenPath, next.hiddenPath]
+  ] as const) {
+    if (fs.existsSync(source)) {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(source, target);
+    }
+  }
+}
+
+/**
+ * Extracts the launcher path from `schtasks /Query /XML` output. The task
+ * action runs `wscript.exe "<vbs path>"`, so the VBS path sits in the
+ * `<Arguments>` element of the `<Exec>` action. Returns null when the output
+ * cannot be parsed (never throws: status reporting must stay honest but cheap).
+ */
+export function parseWindowsTaskActionTarget(xml: string): string | null {
+  const match = xml.match(/<Arguments>([\s\S]*?)<\/Arguments>/i);
+  if (!match) {
+    return null;
+  }
+
+  const decoded = match[1]
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .trim()
+    .replace(/^"+|"+$/g, '')
+    .trim();
+
+  return decoded || null;
+}
+
+/**
+ * Resolves the on-disk target of a Windows scheduled task action, or null
+ * when it cannot be determined. Used by `status`/`startup-status` so a task
+ * whose launcher file is gone reports Broken instead of Active.
+ */
+export function queryWindowsTaskTarget(taskName: string): string | null {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+
+  try {
+    const output = execFileSync('schtasks', ['/Query', '/TN', taskName, '/XML'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    return parseWindowsTaskActionTarget(typeof output === 'string' ? output : String(output));
+  } catch (_) {
+    return null;
+  }
+}
+
 export function writeWindowsLauncher(
   scriptPath: string,
   options: { installDirectory: string; logDirectory: string }
@@ -101,7 +187,7 @@ export function writeWindowsHiddenLauncher(
   launcherPath: string,
   options: { installDirectory: string; appId: string }
 ): string {
-  const vbsPath = path.join(options.installDirectory, `${options.appId}.vbs`);
+  const vbsPath = windowsLauncherPaths(options.installDirectory, options.appId).hiddenPath;
   const escaped = launcherPath.replace(/"/g, '""');
   fs.writeFileSync(vbsPath, [
     'Set shell = CreateObject("WScript.Shell")',

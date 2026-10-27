@@ -57,6 +57,7 @@ test('setup from a packed npm install creates a self-contained runtime', {
     ...process.env,
     FORCE_COLOR: '0',
     HOME: home,
+    DISCORD_CODING_STATUS_SKIP_DAEMON_RESTART: '1',
     USERPROFILE: home
   };
   execFileSync(process.execPath, [

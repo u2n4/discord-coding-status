@@ -39,6 +39,15 @@ export const APP_REPOSITORY = 'https://github.com/howznguyen/discord-coding-stat
 export const APP_LICENSE = 'MIT';
 export const MACOS_LAUNCH_AGENT_ID = 'io.github.discord-coding-status.daemon';
 export const WINDOWS_TASK_NAME = 'DiscordCodingStatus';
+
+export function getWindowsTaskName(): string {
+  return (process.env.DISCORD_CODING_STATUS_TASK_NAME || '').trim() || WINDOWS_TASK_NAME;
+}
+
+export function isDaemonRestartSkipped(): boolean {
+  return process.env.DISCORD_CODING_STATUS_SKIP_DAEMON_RESTART === '1';
+}
+
 export const PI_EXTENSION_TARGET = path.join(os.homedir(), '.pi', 'agent', 'extensions', 'discord-coding-status.ts');
 export const OPENCODE_PLUGIN_TARGET = path.join(os.homedir(), '.config', 'opencode', 'plugins', 'discord-coding-status.js');
 export const USER_DATA_DIR = path.join(os.homedir(), APP_ID);
@@ -71,6 +80,7 @@ export const OPENCODE_CLIENT_ID = DISCORD_APPLICATIONS.get('opencode')?.clientId
 export const PI_CLIENT_ID = DISCORD_APPLICATIONS.get('pi')?.clientId || '';
 export const GROK_CLIENT_ID = DISCORD_APPLICATIONS.get('grok')?.clientId || '';
 export const CURSOR_CLIENT_ID = DISCORD_APPLICATIONS.get('cursor')?.clientId || '';
+export const MUSE_CLIENT_ID = DISCORD_APPLICATIONS.get('muse')?.clientId || '';
 export const FALLBACK_CLIENT_ID = (process.env.DISCORD_CLIENT_ID || '').trim();
 export const LARGE_IMAGE_KEY = (process.env.DISCORD_LARGE_IMAGE_KEY || '').trim();
 export const SMALL_IMAGE_KEY = (process.env.DISCORD_SMALL_IMAGE_KEY || '').trim();
@@ -159,6 +169,11 @@ export function getPackageRoot(): string {
 }
 
 export function getConfigDirectory(): string {
+  const override = (process.env.DISCORD_CODING_STATUS_CONFIG_DIR || '').trim();
+  if (override) {
+    return path.resolve(override);
+  }
+
   if (process.platform === 'darwin') {
     return path.join(os.homedir(), 'Library', 'Application Support', APP_ID);
   }

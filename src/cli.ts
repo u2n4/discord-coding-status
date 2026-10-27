@@ -47,6 +47,9 @@ import {
   getMacLaunchAgentPath,
   installMacLaunchAgent,
   installWindowsScheduledTask,
+  preserveWindowsLaunchers,
+  queryWindowsTaskTarget,
+  windowsLauncherPaths,
   restartManagedDaemon
 } from './adapters/startup/service';
 import type { DaemonRefreshResult } from './adapters/startup/types';
@@ -66,6 +69,7 @@ import {
   DEFAULT_OPENCODE_CLIENT_ID,
   DEFAULT_PI_CLIENT_ID,
   DEFAULT_GROK_CLIENT_ID,
+  DEFAULT_MUSE_CLIENT_ID,
   requireToolPresence,
   toolProviders
 } from './providers/registry';
@@ -78,7 +82,8 @@ import {
   APP_REPOSITORY,
   APP_LICENSE,
   MACOS_LAUNCH_AGENT_ID,
-  WINDOWS_TASK_NAME,
+  getWindowsTaskName,
+  isDaemonRestartSkipped,
   PI_EXTENSION_TARGET,
   OPENCODE_PLUGIN_TARGET,
   USER_DATA_DIR,
@@ -95,6 +100,7 @@ import {
   PI_CLIENT_ID,
   GROK_CLIENT_ID,
   CURSOR_CLIENT_ID,
+  MUSE_CLIENT_ID,
   DETAIL_LEVEL,
   CODEX_QUOTA_SOURCE,
   CODEX_BIN,
@@ -157,9 +163,13 @@ function getRuntimeScriptPath(baseDirectory = getPackageRoot()): string {
 }
 
 function stopRunningDaemonForUpdate(): void {
+  if (isDaemonRestartSkipped()) {
+    return;
+  }
+
   if (process.platform === 'win32') {
     try {
-      execFileSync('schtasks', ['/End', '/TN', WINDOWS_TASK_NAME], { stdio: 'ignore' });
+      execFileSync('schtasks', ['/End', '/TN', getWindowsTaskName()], { stdio: 'ignore' });
     } catch (_) {}
 
     try {
@@ -318,6 +328,7 @@ function copyRuntimeToInstallDir(): string {
       throw new Error(`Missing runtime dependencies: ${missingDependencies.join(', ')}`);
     }
 
+    preserveWindowsLaunchers(installDir, tempDir, APP_ID);
     replaceDirectorySafe(tempDir, installDir);
     return getRuntimeScriptPath(installDir);
   } catch (error) {
@@ -418,6 +429,12 @@ function compactConfigEntries(entries: Record<string, string>): Record<string, s
     'DISCORD_CODING_STATUS_GROK_CLIENT_ID',
     entries.DISCORD_CODING_STATUS_GROK_CLIENT_ID || DEFAULT_GROK_CLIENT_ID,
     DEFAULT_GROK_CLIENT_ID
+  );
+  setConfigIfCustom(
+    next,
+    'DISCORD_CODING_STATUS_MUSE_CLIENT_ID',
+    entries.DISCORD_CODING_STATUS_MUSE_CLIENT_ID || DEFAULT_MUSE_CLIENT_ID,
+    DEFAULT_MUSE_CLIENT_ID
   );
   setConfigIfCustom(
     next,
@@ -594,7 +611,7 @@ function writeConfigEntries(
   console.log(success(`${verb} config: ${CONFIG_FILE}`));
   const refreshResult = restartManagedDaemon({
     macosLaunchAgentId: MACOS_LAUNCH_AGENT_ID,
-    windowsTaskName: WINDOWS_TASK_NAME,
+    windowsTaskName: getWindowsTaskName(),
     skipRestart: options.skipRestart
   });
   printDaemonRefreshResult(refreshResult);
@@ -610,7 +627,7 @@ function installStartup(scriptPath: string, startNow: boolean): string {
 
   if (process.platform === 'win32') {
     return installWindowsScheduledTask(scriptPath, startNow, {
-      taskName: WINDOWS_TASK_NAME,
+      taskName: getWindowsTaskName(),
       installDirectory: getInstallDirectory(),
       logDirectory: getLogDirectory(),
       appId: APP_ID
@@ -632,7 +649,7 @@ function uninstallStartup(purge: boolean): void {
     fs.rmSync(plistPath, { force: true });
   } else if (process.platform === 'win32') {
     try {
-      execFileSync('schtasks', ['/Delete', '/TN', WINDOWS_TASK_NAME, '/F'], { stdio: 'ignore' });
+      execFileSync('schtasks', ['/Delete', '/TN', getWindowsTaskName(), '/F'], { stdio: 'ignore' });
     } catch (_) {
       // It may already be deleted.
     }
@@ -652,6 +669,8 @@ async function printStartupStatus(args: Record<string, string | boolean> = {}): 
 
   let installed = false;
   let target = '';
+  let launcherTarget = '';
+  let missingTargets: string[] = [];
 
   if (process.platform === 'darwin') {
     const plistPath = getMacLaunchAgentPath(MACOS_LAUNCH_AGENT_ID);
@@ -659,18 +678,29 @@ async function printStartupStatus(args: Record<string, string | boolean> = {}): 
     target = plistPath;
   } else if (process.platform === 'win32') {
     try {
-      execFileSync('schtasks', ['/Query', '/TN', WINDOWS_TASK_NAME], { stdio: 'ignore' });
+      execFileSync('schtasks', ['/Query', '/TN', getWindowsTaskName()], { stdio: 'ignore' });
       installed = true;
     } catch (_) {
       installed = false;
     }
-    target = WINDOWS_TASK_NAME;
+    target = getWindowsTaskName();
+    if (installed) {
+      const launchers = windowsLauncherPaths(getInstallDirectory(), APP_ID);
+      launcherTarget = queryWindowsTaskTarget(getWindowsTaskName()) || launchers.hiddenPath;
+      const candidates = launcherTarget === launchers.hiddenPath
+        ? [launchers.hiddenPath, launchers.commandPath]
+        : [launcherTarget, launchers.hiddenPath, launchers.commandPath];
+      missingTargets = [...new Set(candidates)].filter((candidate) => !fs.existsSync(candidate));
+    }
   }
 
   if (isJson) {
     console.log(JSON.stringify({
       platform: process.platform === 'darwin' ? 'macos' : (process.platform === 'win32' ? 'windows' : process.platform),
       installed,
+      healthy: installed && missingTargets.length === 0,
+      launcherTarget,
+      missingTargets,
       target,
       configFile: CONFIG_FILE,
       stateFile: STATE_FILE,
@@ -724,8 +754,14 @@ async function printStartupStatus(args: Record<string, string | boolean> = {}): 
     system: [
       {
         name: 'Startup',
-        status: installed ? success('✔ Active') : warning('✖ Not installed'),
-        target: accent(compactHomePath(target || 'not configured'))
+        status: !installed
+          ? warning('✖ Not installed')
+          : (missingTargets.length > 0 ? danger('✖ Broken') : success('✔ Active')),
+        target: accent(compactHomePath(
+          missingTargets.length > 0
+            ? `missing launcher ${missingTargets[0]} (run setup to repair)`
+            : (target || 'not configured')
+        ))
       },
       {
         name: 'Config',
@@ -783,6 +819,7 @@ async function main(): Promise<void> {
     piClientId: PI_CLIENT_ID,
     grokClientId: GROK_CLIENT_ID,
     cursorClientId: CURSOR_CLIENT_ID,
+    museClientId: MUSE_CLIENT_ID,
     configFile: CONFIG_FILE,
     stateFile: STATE_FILE
   })) {
@@ -831,7 +868,7 @@ async function main(): Promise<void> {
     compactPath: compactHomePath,
     defaultStartupPath: process.platform === 'darwin'
       ? path.join(os.homedir(), 'Library', 'LaunchAgents', `${MACOS_LAUNCH_AGENT_ID}.plist`)
-      : WINDOWS_TASK_NAME
+      : getWindowsTaskName()
   })) {
     process.exit(process.exitCode || 0);
   }
@@ -847,7 +884,8 @@ async function main(): Promise<void> {
     findInstaller: (harness) => findHookInstaller(harness),
     restartDaemon: () => restartManagedDaemon({
       macosLaunchAgentId: MACOS_LAUNCH_AGENT_ID,
-      windowsTaskName: WINDOWS_TASK_NAME
+      windowsTaskName: getWindowsTaskName(),
+      skipRestart: isDaemonRestartSkipped()
     })
   })) {
     process.exit(process.exitCode || 0);

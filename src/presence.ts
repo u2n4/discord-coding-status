@@ -8,16 +8,6 @@ import {
   LARGE_IMAGE_KEY,
   SMALL_IMAGE_KEY,
   FALLBACK_CLIENT_ID,
-  SHOW_ACTIVITY,
-  SHOW_PROJECT,
-  SHOW_MODEL,
-  SHOW_QUOTA,
-  SHOW_CONTEXT,
-  SHOW_PACKAGE,
-  PROJECT_NAME_OVERRIDE,
-  PACKAGE_NAME_OVERRIDE,
-  PLAN_TEXT_OVERRIDE,
-  CODEX_QUOTA_SOURCE,
   RECONNECT_INTERVAL_MS,
   CONNECT_TIMEOUT_MS,
   execFileSyncString,
@@ -25,14 +15,9 @@ import {
 } from './env';
 import {
   statusLabel,
-  styledStatusLabel,
-  emojiForStatus,
   joinPresenceParts,
   sanitizeBranchName,
   truncatePresenceText,
-  sanitizeProjectName,
-  sanitizePackageName,
-  formatContextText,
   titleCase,
   surfaceLabel,
   statePriority,
@@ -46,8 +31,6 @@ import {
 } from './state-store';
 import {
   claudeUsageRevisionBySession,
-  getUsageText,
-  shouldShowUsage,
   toolFamilyForTool
 } from './quota';
 import {
@@ -55,11 +38,9 @@ import {
   toolProviders
 } from './providers/registry';
 import { discordApplicationForTool } from './providers/discord';
-import { getCwdForProcess } from './adapters/system/processes';
 import type { ActiveTool } from './core/tools/types';
 import type {
   PackageInfo,
-  PresenceMetadata,
   PresencePayload
 } from './core/presence/types';
 import type { HookSessionState } from './core/hooks/types';
@@ -81,17 +62,18 @@ export function markShuttingDown(): void {
   shuttingDown = true;
 }
 
-function shouldShowProject(): boolean {
-  return SHOW_PROJECT;
-}
-
-function shouldShowPackage(): boolean {
-  return SHOW_PACKAGE;
-}
-
 export function clientIdForTool(tool: ActiveTool): string | null {
   const application = discordApplicationForTool(tool, toolProviders, DISCORD_APPLICATIONS);
-  return application?.clientId || FALLBACK_CLIENT_ID || null;
+  if (!application) {
+    // Genuinely unknown legacy tool: the only case the global fallback ID
+    // still covers.
+    return FALLBACK_CLIENT_ID || null;
+  }
+
+  // A known tool without its own Discord application ID (Muse until the user
+  // creates one) must fail closed: publishing it under the legacy global ID
+  // would show the wrong application identity on Discord.
+  return application.clientId || null;
 }
 
 export function createRpcConnectionState(): RpcConnectionState {
@@ -101,7 +83,6 @@ export function createRpcConnectionState(): RpcConnectionState {
     reconnectTimer: null,
     connecting: null,
     activeToolKey: null,
-    activityStartedAt: null,
     lastSentActivitySignature: null,
     lastCleared: true,
     connectionAttempt: 0
@@ -145,9 +126,16 @@ function scheduleReconnect(clientId: string): void {
   }, RECONNECT_INTERVAL_MS);
 }
 
-function rejectAfter(ms: number, message: string): Promise<never> {
+export function rejectAfter(
+  ms: number,
+  message: string,
+  capture?: (timer: ReturnType<typeof setTimeout>) => void
+): Promise<never> {
   return new Promise((_, reject) => {
-    setTimeout(() => reject(new Error(message)), ms);
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    if (capture) {
+      capture(timer);
+    }
   });
 }
 
@@ -212,7 +200,15 @@ export async function connectToDiscord(clientId: string): Promise<void> {
       loginPromise.catch(() => {});
       await Promise.race([
         loginPromise,
-        rejectAfter(CONNECT_TIMEOUT_MS, 'Timed out while waiting for Discord RPC.')
+        rejectAfter(CONNECT_TIMEOUT_MS, 'Timed out while waiting for Discord RPC.', (timer) => {
+          // The login promise settles exactly once; clearing here releases the
+          // timeout handle on success instead of letting it linger (and fire)
+          // for the full CONNECT_TIMEOUT_MS after every connect.
+          void loginPromise.then(
+            () => clearTimeout(timer),
+            () => clearTimeout(timer)
+          );
+        })
       ]);
     } catch (error) {
       if (client && client === state.client) {
@@ -480,76 +476,11 @@ export function getGitBranch(directory: string | null): string | null {
   }
 }
 
-export async function getPresenceMetadata(tool: ActiveTool): Promise<PresenceMetadata> {
-  const metadata: PresenceMetadata = {
-    projectName: null,
-    packageName: null,
-    branchName: null,
-    usageText: null
-  };
-
-  if (!shouldShowProject() && !shouldShowPackage() && !shouldShowUsage()) {
-    return metadata;
-  }
-
-  const cwd = tool.cwd || await getCwdForProcess(tool.processInfo);
-  const packageInfo = readPackageInfo(cwd);
-  const projectRoot = packageInfo?.root || cwd;
-
-  if (shouldShowProject()) {
-    metadata.projectName = sanitizeProjectName(PROJECT_NAME_OVERRIDE)
-      || sanitizeProjectName(tool.projectName)
-      || sanitizeProjectName(packageInfo && packageInfo.root)
-      || sanitizeProjectName(cwd);
-  }
-
-  metadata.branchName = getGitBranch(projectRoot);
-
-  if (shouldShowPackage()) {
-    metadata.packageName = sanitizePackageName(PACKAGE_NAME_OVERRIDE)
-      || sanitizePackageName(tool.packageName)
-      || sanitizePackageName(packageInfo && packageInfo.name);
-  }
-
-  metadata.usageText = await getUsageText(tool);
-  return metadata;
-}
-
-export function activityTextForPresence(tool: ActiveTool): string {
-  return truncatePresenceText(
-    tool.activity
-      || styledStatusLabel(tool.status)
-      || tool.details
-      || tool.state
-  );
-}
-
-function projectBranchText(metadata: PresenceMetadata): string | null {
-  if (metadata.projectName && metadata.branchName) {
-    return `${metadata.projectName} @ ${metadata.branchName}`;
-  }
-
-  return metadata.projectName;
-}
-
 function modelTextForPresence(tool: ActiveTool): string | null {
+  // Raw model id only: reasoning effort and every other enrichment are
+  // intentionally excluded from the minimal display contract.
   const model = String(tool.model || '').replace(/\s+/g, ' ').trim();
-  const effort = String(tool.effort || '').replace(/\s+/g, ' ').trim();
-
-  if (!model) {
-    return null;
-  }
-
-  return truncatePresenceText(effort ? `${model} · ${effort}` : model);
-}
-
-function sessionStatusEmoji(tool: ActiveTool): string {
-  return emojiForStatus(tool.status) || '';
-}
-
-function activityEmojiText(tool: ActiveTool, activityText: string): string {
-  const emoji = sessionStatusEmoji(tool);
-  return emoji ? `${emoji} ${activityText}`.trim() : activityText;
+  return model ? truncatePresenceText(model) : null;
 }
 
 export async function enrichToolForPresence(tool: ActiveTool | null): Promise<ActiveTool | null> {
@@ -557,32 +488,18 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
     return null;
   }
 
-  const metadata = await getPresenceMetadata(tool);
-  const activityText = activityTextForPresence(tool);
-  const modelText = modelTextForPresence(tool);
-  const contextText = formatContextText(tool.contextText);
-  const sessionMarker = tool.sessionCount && tool.sessionCount > 1
-    ? `👥 ${tool.sessionCount}`
-    : null;
-  const details = joinPresenceParts([
-    sessionMarker,
-    SHOW_ACTIVITY ? activityEmojiText(tool, activityText) : null,
-    SHOW_PROJECT ? projectBranchText(metadata) : null
-  ]);
-  const quotaFallback = toolFamilyForTool(tool) === 'codex'
-    ? PLAN_TEXT_OVERRIDE || (CODEX_QUOTA_SOURCE === 'off' ? 'Codex quota disabled' : 'Codex quota unavailable')
-    : null;
-  const state = joinPresenceParts([
-    SHOW_MODEL ? modelText : null,
-    SHOW_QUOTA ? metadata.usageText || quotaFallback : null,
-    SHOW_CONTEXT ? contextText : null,
-    SHOW_PACKAGE && metadata.packageName ? `pkg ${metadata.packageName}` : null
-  ]);
+  // Minimal display contract: the Discord application identity already shows
+  // the tool name ("Playing Codex"), so the only published line is the raw
+  // model id. No activity, project, branch, quota, context, package, emoji,
+  // session counts, or timestamps are ever sent to Discord.
+  // Model is shown ONLY when positively bound (hook/session tool.model).
+  // Process-detected Codex Desktop and Muse have no PID binding: app-only.
+  const model = modelTextForPresence(tool);
 
   return {
     ...tool,
-    details,
-    state
+    details: model ? truncatePresenceText(`Model: ${model}`) : '',
+    state: ''
   };
 }
 
@@ -591,9 +508,9 @@ export async function enrichToolsForPresence(tools: ActiveTool[]): Promise<Activ
   return enriched.filter((tool): tool is ActiveTool => Boolean(tool));
 }
 
-export function buildPresence(tool: ActiveTool, activityStartedAt: Date | null): PresencePayload {
+export function buildPresence(tool: ActiveTool): PresencePayload {
+  // No startTimestamp: elapsed-time display is disabled entirely.
   const presence: PresencePayload = {
-    startTimestamp: activityStartedAt || new Date(),
     instance: false
   };
   const largeImageKey = largeImageKeyForTool(tool);
@@ -622,23 +539,12 @@ function largeImageKeyForTool(tool: ActiveTool): string | null {
   return application?.imageKey || LARGE_IMAGE_KEY || null;
 }
 
-function activityStartDate(tool: ActiveTool): Date {
-  const startedAt = coerceStateTimestamp(tool.startedAt);
-  if (!startedAt) {
-    return new Date();
-  }
-
-  const date = new Date(startedAt);
-  return Number.isFinite(date.getTime()) ? date : new Date();
-}
-
-function getActivitySignature(tool: ActiveTool, activityStartedAt: Date | null): string {
+function getActivitySignature(tool: ActiveTool): string {
   return [
     clientIdForTool(tool),
     tool.key,
     tool.details,
     tool.state,
-    activityStartedAt,
     largeImageKeyForTool(tool),
     SMALL_IMAGE_KEY
   ].join('|');
@@ -646,7 +552,6 @@ function getActivitySignature(tool: ActiveTool, activityStartedAt: Date | null):
 
 export async function clearConnectionActivity(clientId: string, state: RpcConnectionState): Promise<void> {
   state.activeToolKey = null;
-  state.activityStartedAt = null;
   state.lastSentActivitySignature = null;
   cancelReconnect(state);
 
@@ -667,13 +572,9 @@ async function updateActivityForClient(clientId: string, tool: ActiveTool): Prom
 
   if (state.activeToolKey !== tool.key) {
     state.activeToolKey = tool.key;
-    state.activityStartedAt = activityStartDate(tool);
     state.lastSentActivitySignature = null;
     state.lastCleared = false;
-    log(`Detected ${tool.state} for ${labelForClientId(clientId)}.`);
-  } else if (!state.activityStartedAt) {
-    state.activityStartedAt = activityStartDate(tool);
-    state.lastSentActivitySignature = null;
+    log(`Detected ${tool.details || tool.key} for ${labelForClientId(clientId)}.`);
   }
 
   if (!state.ready || !state.client) {
@@ -684,15 +585,15 @@ async function updateActivityForClient(clientId: string, tool: ActiveTool): Prom
     return;
   }
 
-  const signature = getActivitySignature(tool, state.activityStartedAt);
+  const signature = getActivitySignature(tool);
   if (signature === state.lastSentActivitySignature) {
     return;
   }
 
-  await state.client.setActivity(buildPresence(tool, state.activityStartedAt));
+  await state.client.setActivity(buildPresence(tool));
   state.lastSentActivitySignature = signature;
   state.lastCleared = false;
-  log(`Updated ${labelForClientId(clientId)} activity: ${tool.details} / ${tool.state}.`);
+  log(`Updated ${labelForClientId(clientId)} activity: ${tool.details || '(app name only)'}.`);
 }
 
 function sourceRank(tool: ActiveTool): number {
@@ -709,12 +610,12 @@ function sourceRank(tool: ActiveTool): number {
  * actually typing in. Stale hook sessions cannot block forever: they are pruned
  * from the state file after `STATE_MAX_AGE_MS`.
  */
-export function selectNewestTool(tools: ActiveTool[]): ActiveTool | null {
+export function selectNewestTool(tools: ActiveTool[], preferredFamily: string | null = null): ActiveTool | null {
   if (!tools.length) {
     return null;
   }
 
-  return [...tools].sort((left, right) => {
+  const ordered = [...tools].sort((left, right) => {
     const sourceDelta = sourceRank(right) - sourceRank(left);
     if (sourceDelta !== 0) {
       return sourceDelta;
@@ -723,11 +624,27 @@ export function selectNewestTool(tools: ActiveTool[]): ActiveTool | null {
     const leftTime = coerceStateTimestamp(left.updatedAt) || 0;
     const rightTime = coerceStateTimestamp(right.updatedAt) || 0;
     return rightTime - leftTime;
-  })[0];
+  });
+
+  // The foreground window wins: when the user is actively working in one of
+  // the detected tools, that tool is shown even if another tool reported a
+  // hook session more recently.
+  if (preferredFamily) {
+    const foreground = ordered.find((tool) => toolFamilyForTool(tool) === preferredFamily);
+    if (foreground) {
+      return foreground;
+    }
+  }
+
+  return ordered[0];
 }
 
-export async function updateActivities(tools: ActiveTool[]): Promise<void> {
-  const newest = selectNewestTool(tools);
+export async function updateActivities(tools: ActiveTool[], preferredFamily: string | null = null): Promise<void> {
+  // Tools without a Discord application ID cannot display anything; excluding
+  // them here (instead of selecting them) keeps a configured tool visible
+  // instead of blanking Discord.
+  const displayable = tools.filter((tool) => clientIdForTool(tool));
+  const newest = selectNewestTool(displayable, preferredFamily);
   const newestClientId = newest ? clientIdForTool(newest) : null;
 
   for (const [clientId, state] of rpcConnections) {
@@ -741,6 +658,6 @@ export async function updateActivities(tools: ActiveTool[]): Promise<void> {
   }
 }
 
-export async function updateActivity(tool: ActiveTool | null): Promise<void> {
-  await updateActivities(tool ? [tool] : []);
+export async function updateActivity(tool: ActiveTool | null, preferredFamily: string | null = null): Promise<void> {
+  await updateActivities(tool ? [tool] : [], preferredFamily);
 }

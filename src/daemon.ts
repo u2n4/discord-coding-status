@@ -29,6 +29,7 @@ import {
 } from './env';
 import {
   cancelReconnect,
+  clientIdForTool,
   detectStateTools,
   enrichToolsForPresence,
   labelForClientId,
@@ -41,6 +42,10 @@ import {
 import {
   registerUsageRefreshKick
 } from './quota';
+import {
+  familyForForegroundProcess,
+  getForegroundPid
+} from './adapters/system/foreground';
 import {
   debugLog,
   log
@@ -71,7 +76,9 @@ function validateEnvironment(): void {
 
   for (const [name, value] of ids) {
     if (!value) {
-      if (name === 'DISCORD_CLIENT_ID' || name.endsWith('CURSOR_CLIENT_ID')) {
+      if (name === 'DISCORD_CLIENT_ID'
+        || name.endsWith('CURSOR_CLIENT_ID')
+        || name.endsWith('MUSE_CLIENT_ID')) {
         continue;
       }
 
@@ -84,6 +91,55 @@ function validateEnvironment(): void {
       console.error(dim('Expected a numeric client ID, not a bot token, client secret, or application name.'));
       process.exit(1);
     }
+  }
+}
+
+const DAEMON_LOCK_FILE = `${STATE_FILE}.daemon.lock`;
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function readLockPid(): number | null {
+  try {
+    const pid = Number(fs.readFileSync(DAEMON_LOCK_FILE, 'utf8').trim());
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Prevents duplicate daemon instances (a second manual start, or a task
+// restart racing a slow shutdown). Stale locks from crashed daemons are
+// taken over once their PID is gone.
+function acquireDaemonLock(): boolean {
+  const existingPid = readLockPid();
+  if (existingPid && existingPid !== process.pid && isPidAlive(existingPid)) {
+    return false;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(DAEMON_LOCK_FILE), { recursive: true });
+    fs.writeFileSync(DAEMON_LOCK_FILE, String(process.pid));
+    return true;
+  } catch (error) {
+    logError('Could not write the daemon lock file; starting without duplicate protection', error);
+    return true;
+  }
+}
+
+function releaseDaemonLock(): void {
+  try {
+    if (readLockPid() === process.pid) {
+      fs.unlinkSync(DAEMON_LOCK_FILE);
+    }
+  } catch (_) {
+    // Best effort cleanup.
   }
 }
 
@@ -104,18 +160,27 @@ async function runLoopOnce(): Promise<void> {
 
       try {
         const stateTools = detectStateTools();
+        const processList = PROCESS_DETECTION_ENABLED ? await getProcessList() : [];
         const processTools = PROCESS_DETECTION_ENABLED
-          ? detectActiveTools(await getProcessList(), toolProviders, {
+          ? detectActiveTools(processList, toolProviders, {
             preferredSurfaceByFamily: PREFER_CODEX_CLI ? { codex: 'cli' } : {},
             idleGraceMs: PROCESS_IDLE_GRACE_MS,
             activeCpuMs: PROCESS_ACTIVE_CPU_MS
           })
           : [];
         debugLog(`Loop found ${stateTools.length} state tool(s) and ${processTools.length} process tool(s).`);
-        const activeTools = await enrichToolsForPresence(
-          mergeActiveTools(stateTools, processTools)
-        );
-        await updateActivities(activeTools);
+        const merged = mergeActiveTools(stateTools, processTools);
+        // Foreground detection only runs while several displayable tools
+        // compete, so the common single-tool case costs no extra spawn.
+        let preferredFamily: string | null = null;
+        if (merged.filter((tool) => clientIdForTool(tool)).length >= 2) {
+          const foregroundPid = await getForegroundPid();
+          if (foregroundPid) {
+            preferredFamily = familyForForegroundProcess(foregroundPid, processList, toolProviders);
+          }
+        }
+        const activeTools = await enrichToolsForPresence(merged);
+        await updateActivities(activeTools, preferredFamily);
       } catch (error) {
         logError('Loop iteration failed; continuing', error);
       }
@@ -194,6 +259,7 @@ async function shutdown(signal: string): Promise<void> {
 
   shuttingDown = true;
   markShuttingDown();
+  releaseDaemonLock();
   log(`Received ${signal}. Shutting down.`);
 
   if (pollTimer) {
@@ -241,6 +307,10 @@ process.on('uncaughtException', (error) => {
 
 export function startDaemon(): void {
   validateEnvironment();
+  if (!acquireDaemonLock()) {
+    log('Another daemon instance is already running. Exiting.');
+    process.exit(0);
+  }
   log(`Starting ${APP_TITLE} daemon.`);
   log(`Presence detail level: ${DETAIL_LEVEL}.`);
   startPolling();

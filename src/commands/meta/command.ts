@@ -17,6 +17,7 @@ export interface MetaCommandContext {
   piClientId: string;
   grokClientId: string;
   cursorClientId: string;
+  museClientId: string;
   configFile: string;
   stateFile: string;
 }
@@ -62,6 +63,7 @@ ${pc.bold('Default Discord Application IDs:')}
   Pi: ${accent(context.piClientId)}
   Grok: ${accent(context.grokClientId)}
   Cursor: ${accent(context.cursorClientId)}
+  Muse Code: ${accent(context.museClientId)}
 
 ${pc.bold('Config file:')}
   ${accent(context.configFile)}

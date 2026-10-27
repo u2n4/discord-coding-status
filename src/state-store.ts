@@ -69,12 +69,43 @@ export function readStateFile(): HookStateFile {
   }
 }
 
+const STATE_RENAME_ATTEMPTS = 10;
+const STATE_RENAME_RETRYABLE = new Set(['EPERM', 'EACCES']);
+
+// Windows transiently refuses to replace a file that a scanner, indexer, or a
+// racing hook process still has open (EPERM/EACCES). The rename itself stays
+// atomic; only the attempt is retried with backoff, and the last error is
+// rethrown so failures are never suppressed.
+function renameWithRetrySync(source: string, target: string): void {
+  for (let attempt = 1; attempt <= STATE_RENAME_ATTEMPTS; attempt += 1) {
+    try {
+      fs.renameSync(source, target);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (!STATE_RENAME_RETRYABLE.has(code || '') || attempt === STATE_RENAME_ATTEMPTS) {
+        throw error;
+      }
+      sleepSync(25 * attempt);
+    }
+  }
+}
+
 export function writeStateFile(state: HookStateFile): void {
   fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
 
   const tmpPath = `${STATE_FILE}.${process.pid}.tmp`;
   fs.writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}\n`);
-  fs.renameSync(tmpPath, STATE_FILE);
+  try {
+    renameWithRetrySync(tmpPath, STATE_FILE);
+  } catch (error) {
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (_) {
+      // Best effort: never mask the original rename failure.
+    }
+    throw error;
+  }
 }
 
 export function sleepSync(ms: number): void {

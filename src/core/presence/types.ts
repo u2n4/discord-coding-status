@@ -20,7 +20,7 @@ export interface RichStateParts {
 export interface PresencePayload {
   details?: string;
   state?: string;
-  startTimestamp: Date;
+  startTimestamp?: Date;
   instance: false;
   largeImageKey?: string;
   smallImageKey?: string;

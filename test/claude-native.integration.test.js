@@ -46,6 +46,7 @@ function claudeTestEnvironment(baseEnv, directory, overrides = {}) {
     env: {
       ...baseEnv,
       HOME: directory,
+      USERPROFILE: directory,
       CLAUDE_CONFIG_DIR: claudeConfigDir,
       ANTHROPIC_API_KEY: '',
       ANTHROPIC_AUTH_TOKEN: '',
@@ -106,6 +107,12 @@ function requestLog(filePath) {
     .map((line) => JSON.parse(line));
 }
 
+function rpcText(rpcLogFile) {
+  return readRpcEvents(rpcLogFile)
+    .map((event) => JSON.stringify(event.activity || {}))
+    .join('\n');
+}
+
 test('quota --tool claude uses the fixed OAuth usage host and fails closed for API-key mode', async (t) => {
   const { directory, env: baseEnv } = createTestEnvironment(t);
   const { claudeConfigDir, env, requestLogFile } = claudeTestEnvironment(baseEnv, directory);
@@ -164,11 +171,11 @@ test('quota --tool claude uses the fixed OAuth usage host and fails closed for A
   assert.equal(requestLog(requestLogFile).length, 1, 'custom Claude modes must not make an OAuth usage request');
 });
 
-// The mocked Claude quota endpoint stalls this long, so presence must not
-// block on it.
+// The mocked Claude quota endpoint would stall this long, so presence must
+// never depend on it.
 const SLOW_QUOTA_DELAY_MS = 2000;
 
-test('native Claude hooks update raw model immediately while slow quota refresh stays in background', async (t) => {
+test('native Claude hooks publish the raw model immediately and never quota', async (t) => {
   const { directory, env: baseEnv, rpcLogFile, stateFile } = createTestEnvironment(t);
   const { env, requestLogFile } = claudeTestEnvironment(baseEnv, directory, {
     DISCORD_CODING_STATUS_MOCK_CLAUDE_DELAY_MS: String(SLOW_QUOTA_DELAY_MS)
@@ -208,29 +215,21 @@ test('native Claude hooks update raw model immediately while slow quota refresh 
   // load, which would dominate the budget and make this assertion flaky. The
   // daemon's own publish latency is what matters here, and it stays ~350ms.
   const hookCompletedAt = Date.now();
-  await waitFor(
+  const modelActivity = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.state.includes('claude-sonnet-4-6')
+        && event.activity.details === 'Model: claude-sonnet-4-6'
     ),
-    'the Claude model to reach Discord before quota responds',
+    'the Claude model to reach Discord',
     1200
   );
   assert.ok(
     Date.now() - hookCompletedAt < SLOW_QUOTA_DELAY_MS,
-    'model activity should not wait for the slow quota response'
+    'model activity should not wait for any quota response'
   );
-
-  const enriched = await waitFor(
-    () => readRpcEvents(rpcLogFile).find(
-      (event) => event.method === 'setActivity'
-        && event.activity.state.includes('claude-sonnet-4-6')
-        && event.activity.state.includes('Pro • 5h 75% • weekly 60%')
-    ),
-    'the background Claude quota to enrich Discord',
-    5000
-  );
-  assert.equal(enriched.clientId, '1521213655092428923');
+  assert.equal(modelActivity.clientId, '1521213655092428923');
+  assert.equal(modelActivity.activity.state, undefined);
+  assert.equal(modelActivity.activity.startTimestamp, undefined);
 
   const stateText = fs.readFileSync(stateFile, 'utf8');
   const state = JSON.parse(stateText);
@@ -271,7 +270,7 @@ test('native Claude hooks update raw model immediately while slow quota refresh 
   await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.state.includes('claude-opus-4-6')
+        && event.activity.details === 'Model: claude-opus-4-6'
     ),
     'the changed Claude model to reach Discord'
   );
@@ -295,15 +294,12 @@ test('native Claude hooks update raw model immediately while slow quota refresh 
       model: 'claude-opus-4-6'
     })
   );
-  const changedAccountActivity = await waitFor(
-    () => readRpcEvents(rpcLogFile).find(
-      (event) => event.method === 'setActivity'
-        && event.activity.details.includes('Changed account model only')
-    ),
-    'the changed-account model-only activity to reach Discord'
-  );
-  assert.match(changedAccountActivity.activity.state, /claude-opus-4-6/);
-  assert.doesNotMatch(changedAccountActivity.activity.state, /Pro|5h 75%|weekly 60%/);
+  // Same model as before, so no new activity is required; the published line
+  // stays model-only either way.
+  const latestAfterAccountChange = readRpcEvents(rpcLogFile)
+    .filter((event) => event.method === 'setActivity')
+    .pop();
+  assert.equal(latestAfterAccountChange.activity.details, 'Model: claude-opus-4-6');
 
   await runCli(
     ['claude-hook', '--event', 'PostToolUse', '--activity', 'Custom provider model only'],
@@ -322,18 +318,17 @@ test('native Claude hooks update raw model immediately while slow quota refresh 
   const customProviderActivity = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.details.includes('Custom provider model only')
+        && event.activity.details === 'Model: gateway-model-alias'
     ),
-    'the custom-provider model-only activity to reach Discord'
+    'the custom-provider model to reach Discord'
   );
-  assert.match(customProviderActivity.activity.state, /gateway-model-alias/);
-  assert.doesNotMatch(customProviderActivity.activity.state, /Pro|5h 75%|weekly 60%/);
+  assert.equal(customProviderActivity.activity.state, undefined);
   const customProviderState = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
   assert.equal(customProviderState.sessions['claude-native-session'].claude_quota_eligible, false);
 
+  assert.doesNotMatch(rpcText(rpcLogFile), /Pro •|5h 75%|weekly 60%|Changed account model only|Custom provider model only/);
   const requests = requestLog(requestLogFile);
-  assert.equal(requests.length, 1);
-  assert.equal(JSON.stringify(requests).includes(TEST_ACCESS_TOKEN), false);
+  assert.equal(requests.length, 0, 'presence must not make OAuth usage requests');
   assert.doesNotMatch(
     daemon.output().stdout + daemon.output().stderr,
     new RegExp(`${privatePrompt}|${privateResponse}|${TEST_ACCESS_TOKEN}|replacement-account-token-private|active-custom-provider-key-private`)
@@ -354,6 +349,7 @@ test('Claude hook CLI lifecycle preserves unrelated settings and removes only ma
   const env = {
     ...baseEnv,
     HOME: directory,
+    USERPROFILE: directory,
     CLAUDE_CONFIG_DIR: claudeConfigDir
   };
 

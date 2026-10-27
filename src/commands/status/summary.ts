@@ -31,6 +31,7 @@ function toolDisplayName(tool: string): string {
   if (normalized.includes('claude')) return 'Claude Code';
   if (normalized.includes('codex')) return 'Codex';
   if (normalized.includes('grok')) return 'Grok';
+  if (normalized.includes('muse')) return 'Muse Code';
   if (normalized.includes('opencode')) return 'OpenCode';
   if (normalized.includes('pi')) return 'Pi';
   return tool;

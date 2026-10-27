@@ -20,7 +20,6 @@ const {
   installManagedGrokHooks,
   removeManagedGrokHooks,
   grokHookCommand,
-  grokHookSessionFromArgs,
   statusFromGrokHookEvent
 } = require('../dist/grok-hooks');
 
@@ -133,10 +132,12 @@ test('grok hook events report a session to the daemon, map PreToolUse, and clear
   const activity = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.details.includes('Running run_terminal_command')
     ),
-    'the PreToolUse activity to reach Discord RPC'
+    'the PreToolUse session to reach Discord RPC'
   );
+  assert.equal(activity.activity.details, undefined, 'grok hook input carries no model');
+  assert.equal(activity.activity.state, undefined);
+  assert.doesNotMatch(JSON.stringify(activity.activity), /run_terminal_command/);
 
   const state = JSON.parse((await runCli(['state'], env)).stdout);
   const session = state.sessions['grok-session'];
@@ -207,8 +208,21 @@ test('grok stop events map to waiting_input and invalid stdin still exits 0', as
 test('grok PostToolUse maps to Finished <tool> and SessionStart stays active', async (t) => {
   const { env } = createTestEnvironment(t);
 
-  const post = grokHookSessionFromArgs({ event: 'PostToolUse' }).activity;
-  assert.equal(post, undefined, 'no tool means no activity');
+  // Exercise grok-hook through the CLI (never in-process): the session
+  // builder reads piped stdin, which blocks forever under node --test
+  // because the runner holds the pipe open without EOF.
+  await runCli(
+    ['grok-hook', '--event', 'PostToolUse'],
+    env,
+    15000,
+    JSON.stringify({
+      hookEventName: 'post_tool_use',
+      sessionId: 'grok-post-notool',
+      cwd: process.cwd()
+    })
+  );
+  const noToolState = JSON.parse((await runCli(['state'], env)).stdout);
+  assert.equal(noToolState.sessions['grok-post-notool'].activity, undefined, 'no tool means no activity');
 
   await runCli(
     ['grok-hook', '--event', 'PostToolUse'],

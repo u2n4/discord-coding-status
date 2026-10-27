@@ -118,8 +118,16 @@ export function isCodexDesktopProcess(value: ProcessDescriptor | string): boolea
       || text.includes('/contents/resources/codex') && /(?:^|\s)app-server(?:\s|$)/.test(text);
   }
 
+  // ChatGPT Classic (OpenAI.ChatGPT-Desktop, "ChatGPT Classic.exe") is a plain
+  // chat client without Codex. It must never light up as Codex presence.
+  if (text.includes('chatgpt classic') || text.includes('openai.chatgpt-desktop')) {
+    return false;
+  }
+
   const isWindowsStoreApp = text.includes('/windowsapps/') && (
-    /(?:^|[\s/])chatgpt(?:\.exe)?(?:\s|$)/.test(text)
+    // Exact "chatgpt.exe" basename: "ChatGPT Classic.exe" carries no contiguous
+    // "chatgpt.exe" token, so it cannot match here either.
+    /(?:^|[\s/])chatgpt\.exe(?:\s|$)/.test(text)
       || (text.includes('chatgpt')
         && /(?:^|[\s/])codex(?:\.exe)?(?:\s|$)/.test(text)
         && /(?:^|\s)app-server(?:\s|$)/.test(text))
@@ -142,9 +150,10 @@ export function isCodexCliProcess(value: ProcessDescriptor | string): boolean {
 
   if (executable === 'codex' || executable === 'codex.exe') {
     // The standalone Codex desktop app starts `codex app-server` headless at
-    // login. That background service is not an interactive CLI session and
-    // must not light up as active presence while the user is doing nothing.
-    if (/(?:^|[\s/])app[-_]server(?:\s|$)/.test(text)) {
+    // login, plus a `codex exec-server` cloud service. Those background
+    // services are not interactive CLI sessions and must not light up as
+    // active presence while the user is doing nothing.
+    if (/(?:^|[\s/])(?:app|exec)[-_]server(?:\s|$)/.test(text)) {
       return false;
     }
 
@@ -197,4 +206,18 @@ export function isCursorProcess(value: ProcessDescriptor | string): boolean {
   return text.includes('/cursor.app/')
     || text.includes('cursor')
       && /(?:^|[\s/])(?:cursor)(?:[/.][^\s]*)?(?:\s|$)/.test(text);
+}
+
+export function isMuseProcess(value: ProcessDescriptor | string): boolean {
+  const text = normalizedProcessText(value).replace(/\\/g, '/');
+  const executable = executableBasename(value);
+
+  if (executable === 'muse'
+    || executable === 'muse.exe'
+    || /^muse-bin-[\w.+-]+(?:\.exe)?$/.test(executable)) {
+    return true;
+  }
+
+  return /(?:^|[\s/])muse-bin-[\w.+-]+(?:\.exe)?(?:\s|$)/.test(text)
+    || /(?:^|[\s/])muse(?:\.exe|\.cmd)?(?:\s|$)/.test(text);
 }

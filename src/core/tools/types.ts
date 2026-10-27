@@ -11,6 +11,8 @@ export interface ToolDefinition {
 
 export interface ProcessInfo {
   pid: number;
+  /** Parent PID, when the platform snapshot provides one. */
+  ppid?: number;
   line: string;
   raw: string;
   executablePath?: string | null;

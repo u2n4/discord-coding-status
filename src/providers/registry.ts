@@ -8,6 +8,7 @@ import { opencodeProviders, DEFAULT_OPENCODE_CLIENT_ID } from './opencode/provid
 import { piProviders, DEFAULT_PI_CLIENT_ID } from './pi/provider';
 import { grokProviders, DEFAULT_GROK_CLIENT_ID } from './grok/provider';
 import { cursorProviders, DEFAULT_CURSOR_CLIENT_ID } from './cursor/provider';
+import { museProviders, DEFAULT_MUSE_CLIENT_ID } from './muse/provider';
 
 export {
   DEFAULT_CLAUDE_CLIENT_ID,
@@ -15,7 +16,8 @@ export {
   DEFAULT_OPENCODE_CLIENT_ID,
   DEFAULT_PI_CLIENT_ID,
   DEFAULT_GROK_CLIENT_ID,
-  DEFAULT_CURSOR_CLIENT_ID
+  DEFAULT_CURSOR_CLIENT_ID,
+  DEFAULT_MUSE_CLIENT_ID
 };
 
 export function validateToolProviders(providers: readonly ToolProvider[]): void {
@@ -66,7 +68,8 @@ const builtInProviders: readonly ToolProvider[] = [
   ...opencodeProviders,
   ...piProviders,
   ...grokProviders,
-  ...cursorProviders
+  ...cursorProviders,
+  ...museProviders
 ];
 validateToolProviders(builtInProviders);
 

@@ -2,6 +2,25 @@
   <img src="./assets/cover.png" width="581" alt="Discord Coding Status showing a live AI coding session in Discord Rich Presence">
 </p>
 
+> **Minimal-display fork (Ali).** This copy is customized so Discord shows ONLY the AI app
+> name (through its Discord application identity) plus one `Model: <id>` line — no activity,
+> project, quota, timestamps, or anything else. `SHOW_*`, detail levels, and activity styles
+> are inert here. Differences from upstream:
+> - **Muse Code support**: process detection, application name only (session logs carry no PID, so no live model).
+>   Requires your own Discord application (one-time setup below).
+> - **Fixed detection**: ChatGPT Classic is no longer mistaken for Codex Desktop; headless
+>   `codex exec-server` is no longer mistaken for Codex CLI.
+> - **Foreground-aware switching** on Windows; **duplicate-daemon lock**; tools without a
+>   Discord application ID never blank other tools.
+> - Quota/network lookups are never made for presence. Group policy: none of your prompts,
+>   files, or projects ever leave the machine.
+>
+> **Muse Code Discord app (2 minutes, one time):** create an application named exactly
+> `Muse Code` at https://discord.com/developers/applications (no bot needed; optionally
+> upload an icon as an application asset), copy its Application ID, and add
+> `"DISCORD_CODING_STATUS_MUSE_CLIENT_ID": "<id>"` to `~/discord-coding-status/config.json`.
+> Then restart the daemon (`schtasks /Run /TN DiscordCodingStatus`) or reboot.
+>
 <h1 align="center">Discord Coding Status</h1>
 
 <p align="center">
@@ -33,9 +52,9 @@ Discord Coding Status is a small local daemon that keeps your Discord activity i
 ## Why use it?
 
 - **Real-time updates** - Codex, Claude Code, Grok Code, OpenCode, Pi, and Cursor hook and process changes reach Discord immediately; polling remains as a fallback.
-- **Codex, Claude Code, Grok Code, OpenCode, Pi, and Cursor** - separate Discord application identities are built in for each tool.
-- **Useful context** - show activity, sanitized repository name, branch, package, and quota according to your privacy level.
-- **Quota aware** - read Codex quota from OAuth/app-server RPC, Claude subscription quota from Claude Code OAuth, Grok billing quota, OpenCode Go usage, and Cursor dashboard usage.
+- **Codex, Claude Code, Grok Code, OpenCode, Pi, and Cursor** - separate Discord application identities are built in for each tool (Muse Code needs your own application; see above).
+- **Minimal display** - Discord shows only the app name plus one raw `Model: <id>` line; activity, project, quota, and everything else stay off Discord.
+- **Quota aware (CLI only)** - the `quota` and `status` commands read Codex quota from OAuth/app-server RPC, Claude subscription quota from Claude Code OAuth, Grok billing quota, OpenCode Go usage, and Cursor dashboard usage; presence itself never shows quota.
 - **Local-first** - session state stays on your machine and Rich Presence uses Discord's local IPC/RPC transport.
 - **Starts with your session** - installs a LaunchAgent on macOS or a Scheduled Task on Windows.
 - **Tested without Discord** - integration and stress tests use a deterministic local RPC transport.
@@ -157,21 +176,21 @@ Existing user configuration and session state are preserved. If the managed hook
 
 ## What Discord displays
 
-The default `project` detail level produces two lines:
+This fork shows ONLY the application identity plus one raw model line:
 
 ```text
-<activity> | <project @ branch>
-<raw model> | <plan> • <usage windows>
+Playing <App>          <- Discord application identity per tool
+Model: <raw model id>  <- details line, or absent when the model is unknown
 ```
 
 For example:
 
 ```text
-Bash survived the assignment | my-project @ main
-claude-sonnet-4-6 | Pro • 5h 75% • weekly 60%
+Playing Codex
+Model: gpt-5.6-sol
 ```
 
-Usage percentages are shown as **remaining** quota. Codex window labels come from the returned duration. Claude V1 displays only the subscription plan, 5-hour Session, and 7-day Weekly windows.
+Model ids are raw (never guessed or prettified). There is no effort suffix, activity, project, quota, context, emoji, session counts, or timestamps; an unknown or ambiguous model means application name only.
 
 ### Detail levels
 
@@ -181,7 +200,7 @@ Usage percentages are shown as **remaining** quota. Codex window labels come fro
 | `project` (default) | Yes | Yes | Yes | Yes | No | No |
 | `full` | Yes | Yes | Yes | Yes | No | Yes |
 
-Project values are sanitized before being sent to Discord. Full filesystem paths are not used as Rich Presence text.
+Project values are sanitized before being sent to Discord. Full filesystem paths are not used as Rich Presence text. (In this fork the table above is inert upstream history: presence shows only the raw model line.)
 
 ## Configuration
 
@@ -204,7 +223,7 @@ block, Left/Right to change a choice, `S` to save, and `Q` to cancel.
 The available display blocks are:
 
 - Top line: activity and project + branch.
-- Bottom line: model + reasoning effort, plan + quota, context usage, and package name.
+- Bottom line: raw model only (`Model: <id>`); effort, quota, context, and package blocks are inert in this fork.
 
 Activity text supports four styles selected directly in the TUI:
 
@@ -260,7 +279,7 @@ Example:
 | `activityStyle` | `fun` | Select `fun`, `normal`, `technical`, or `minimal` activity text. |
 | `showActivity` | `true` | Show activity on the top line. |
 | `showProject` | preset | Show project and branch on the top line. |
-| `showModel` | `true` | Show model and reasoning effort on the bottom line. |
+| `showModel` | `true` | Show the raw model on the bottom line (no effort suffix; inert toggle in this fork). |
 | `showQuota` | preset | Show plan and quota on the bottom line. |
 | `showContext` | `false` | Show sanitized numeric context usage on the bottom line when available. |
 | `showPackage` | preset | Show package name on the bottom line. |
@@ -273,7 +292,7 @@ Example:
 | `opencodeClientId` | built in | Override the Discord application ID used for OpenCode. |
 | `piClientId` | built in | Override the Discord application ID used for Pi. |
 | `grokClientId` | built in | Override the Discord application ID used for Grok Code. |
-| `cursorClientId` | - | Discord application ID used for Cursor presence (create your own application). |
+| `cursorClientId` | built in | Override the Discord application ID used for Cursor. |
 | `codexImageKey` | - | Use an uploaded asset key from the Codex Discord application. |
 | `claudeImageKey` | - | Use an uploaded asset key from the Claude Discord application. |
 | `opencodeImageKey` | - | Use an uploaded asset key from the OpenCode Discord application. |
@@ -293,9 +312,9 @@ The built-in application IDs are:
 - OpenCode: `1538957549364322404`
 - Pi: `1538957711503396986`
 - Grok Code: `1539161996715495445`
-- Cursor: *(set your own via `cursorClientId` / `DISCORD_CODING_STATUS_CURSOR_CLIENT_ID`)*
+- Cursor: `1539572948904575087`
 
-Tool-specific IDs let each tool use a separate Discord identity. Custom image keys work only when the matching asset already exists in that Discord application. Cursor has no shared public Discord application, so you must create one and set its client ID for Cursor presence to connect; until then the daemon skips the Cursor connection without affecting other tools.
+Tool-specific IDs let each tool use a separate Discord identity. Custom image keys work only when the matching asset already exists in that Discord application. Only Muse Code has no shared public Discord application: create one named exactly `Muse Code`, set its client ID via `DISCORD_CODING_STATUS_MUSE_CLIENT_ID`, and until then the daemon skips Muse presence without affecting other tools.
 
 ## Codex and OpenCode Go quota
 
@@ -314,7 +333,7 @@ Check the current value directly:
 npx discord-coding-status quota --source oauth
 ```
 
-Quota refreshes run in the background. A slow or unavailable endpoint cannot block a hook activity update from reaching Discord. After the first successful refresh, the daemon keeps showing the last known quota value during temporary failures and replaces it only when fresh quota arrives.
+Quota refreshes run in the background for the `quota`/`status` commands only. A slow or unavailable endpoint cannot block a hook model update from reaching Discord, and presence never displays quota: after the first successful refresh, the engine keeps the last known value in daemon memory during temporary failures and replaces it only when fresh quota arrives.
 
 OAuth access and refresh tokens are read from your local Codex auth file. They are used only with the relevant OpenAI authentication/usage endpoints and are never included in Discord Rich Presence.
 
@@ -326,19 +345,19 @@ Cursor quota reads the session token Cursor writes locally when you are signed i
 - **Windows:** `%APPDATA%\Cursor\User\globalStorage\state.vscdb`.
 - **Linux:** `~/.config/Cursor/User/globalStorage/state.vscdb`.
 
-It queries Cursor's Connect-RPC dashboard endpoint (`api2.cursor.sh`) for `GetCurrentPeriodUsage`, then displays the plan name and remaining percentage/requests:
+It queries Cursor's Connect-RPC dashboard endpoint (`api2.cursor.sh`) for `GetCurrentPeriodUsage`, then the command below prints the plan name and remaining percentage/requests (presence itself stays model-only):
 
 ```sh
 npx discord-coding-status quota --tool cursor
 ```
 
-Cursor is only a desktop/CLI presence provider and has no native lifecycle hooks. Its quota is optional and fail-closed: it appears only when a valid local Cursor login is found. To disable it, set `DISCORD_CODING_STATUS_CURSOR_QUOTA_SOURCE=off`.
+Cursor is only a desktop/CLI presence provider and has no native lifecycle hooks. Its quota lookup is optional and fail-closed: `quota --tool cursor` reports only when a valid local Cursor login is found. To disable it, set `DISCORD_CODING_STATUS_CURSOR_QUOTA_SOURCE=off`.
 
 ## Claude quota and model detection
 
 Managed Claude hooks read only the raw model ID from hook metadata or the bounded tail of the referenced local transcript. Prompt and response content is not copied into state, logs, quota requests, or Discord activity. A model change is picked up on the next managed event; an incomplete transcript keeps the last-known model for that session.
 
-For a compatible Claude subscription login, check the same quota text used by presence:
+For a compatible Claude subscription login, check the quota text from the terminal (presence itself never shows quota):
 
 ```sh
 npx discord-coding-status quota --tool claude
@@ -367,7 +386,7 @@ The installer merges hooks into `~/.codex/hooks.json` for:
 - `PostToolUse`
 - `Stop`
 
-Native Codex hooks provide the active model. The daemon also reads the latest local `turn_context` entry referenced by the hook transcript to capture reasoning effort, so Rich Presence can show values such as `gpt-5.6-sol · xhigh`. Transcript prompts and responses are not included in Discord activity.
+Native Codex hooks provide the active model. The daemon also reads the latest local `turn_context` entry referenced by the hook transcript, but Rich Presence shows only the raw model id (for example `Model: gpt-5.6-sol`); reasoning effort is never displayed. Transcript prompts and responses are not included in Discord activity.
 
 Existing hook configuration is preserved, and the previous file is backed up as `hooks.json.bak` before a change is written.
 
@@ -409,7 +428,7 @@ npx discord-coding-status hook \
   --activity "Working with Claude Code"
 ```
 
-Optional fields include `--model`, `--effort`, and `--context`. The activity line is decorated with a status emoji (for example 🧠 while thinking, ⚡ while running, ✋ when waiting for input) and, when several sessions of the same tool are active at once, prefixed with an emoji count marker (`👥 2 | …` means two sessions are running). The bundled Pi extension (`pi` session reporting) sends model, thinking level, and tool activity automatically; without it, process detection still shows Pi, OpenCode, and other provider families with project context only.
+Optional fields include `--model`, `--effort`, and `--context`, but presence shows only the raw `--model` value (application name only when no model is known). No emoji, status text, session counts, project, or quota ever reach Discord. The bundled Pi extension (`pi` session reporting) sends model, thinking level, and tool activity automatically; without it, process detection still shows Pi, OpenCode, and other provider families by application name only.
 
 Inspect or clear local sessions:
 

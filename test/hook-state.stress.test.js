@@ -44,13 +44,14 @@ test('concurrent hook writes remain atomic and converge on Discord', { timeout: 
     '--status', 'running',
     '--session-id', 'stress-final',
     '--cwd', process.cwd(),
+    '--model', 'stress-model-final',
     '--activity', 'Stress final convergence'
   ], env);
 
   const finalEvent = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.details.includes('Stress final convergence')
+        && event.activity.details === 'Model: stress-model-final'
     ),
     'the final state to converge on Discord RPC',
     15000

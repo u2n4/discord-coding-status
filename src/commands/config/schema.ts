@@ -13,6 +13,7 @@ export const JSON_CONFIG_ALIASES: Record<string, string> = {
   claudeClientId: 'DISCORD_CODING_STATUS_CLAUDE_CLIENT_ID',
   opencodeClientId: 'DISCORD_CODING_STATUS_OPENCODE_CLIENT_ID',
   piClientId: 'DISCORD_CODING_STATUS_PI_CLIENT_ID',
+  museClientId: 'DISCORD_CODING_STATUS_MUSE_CLIENT_ID',
   clientId: 'DISCORD_CLIENT_ID',
   detailLevel: 'DISCORD_CODING_STATUS_DETAIL_LEVEL',
   quotaSource: 'DISCORD_CODING_STATUS_CODEX_QUOTA_SOURCE',
@@ -116,6 +117,11 @@ export function createConfigEditorFields(defaultStateFile: string): ConfigEditor
     {
       key: 'DISCORD_CODING_STATUS_PI_IMAGE_KEY',
       label: 'Pi image key',
+      defaultValue: ''
+    },
+    {
+      key: 'DISCORD_CODING_STATUS_MUSE_CLIENT_ID',
+      label: 'Muse client ID',
       defaultValue: ''
     },
     {

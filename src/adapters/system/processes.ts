@@ -27,7 +27,7 @@ export async function getProcessList(): Promise<ProcessInfo[]> {
 async function getWindowsProcessList(): Promise<ProcessInfo[]> {
   const command = [
     '@(Get-CimInstance Win32_Process |',
-    'Select-Object ProcessId,ExecutablePath,CommandLine,UserModeTime,KernelModeTime) |',
+    'Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,UserModeTime,KernelModeTime) |',
     'ConvertTo-Json -Compress'
   ].join(' ');
   const { stdout } = await execFileAsync('powershell.exe', [
@@ -56,6 +56,8 @@ async function getWindowsProcessList(): Promise<ProcessInfo[]> {
         return null;
       }
 
+      const ppid = extractNumberLike(record?.ParentProcessId);
+
       const commandLine = extractString(record?.CommandLine);
       const executablePath = extractString(record?.ExecutablePath);
       const line = [executablePath, commandLine].filter(Boolean).join(' ');
@@ -69,6 +71,7 @@ async function getWindowsProcessList(): Promise<ProcessInfo[]> {
 
       return {
         pid,
+        ppid: ppid ?? undefined,
         line,
         raw: line,
         executablePath,
