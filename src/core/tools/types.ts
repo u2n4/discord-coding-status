@@ -19,6 +19,8 @@ export interface ProcessInfo {
   commandLine?: string | null;
   /** Cumulative CPU time of the process in milliseconds (when available). */
   cpuMs?: number;
+  /** Process start time in Unix milliseconds (when the platform snapshot provides one). */
+  createdAtMs?: number;
 }
 
 /**
@@ -46,4 +48,6 @@ export interface ActiveTool extends ToolDefinition {
   claudeQuotaEligible?: boolean | null;
   title?: string | null;
   sessionCount?: number | null;
+  /** True when several live processes matched this tool, so a per-process model cannot be proven. */
+  processAmbiguous?: boolean;
 }

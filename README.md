@@ -6,7 +6,7 @@
 > name (through its Discord application identity) plus one `Model: <id>` line — no activity,
 > project, quota, timestamps, or anything else. `SHOW_*`, detail levels, and activity styles
 > are inert here. Differences from upstream:
-> - **Muse Code support**: process detection, application name only (session logs carry no PID, so no live model).
+> - **Muse Code support**: process detection plus headless `exec --session-id <UUID>` live model (exact UUID to session log with open-segment, PID, and freshness guards; bare TUI stays application name only).
 >   Requires your own Discord application (one-time setup below).
 > - **Fixed detection**: ChatGPT Classic is no longer mistaken for Codex Desktop; headless
 >   `codex exec-server` is no longer mistaken for Codex CLI.
@@ -89,6 +89,7 @@ The state file is watched for immediate changes. A 10-second process/polling loo
 | OpenCode CLI | Process detection | OpenCode Go usage | OpenCode |
 | Pi | Process detection | — | Pi |
 | Cursor IDE / CLI | Process detection | Cursor dashboard usage | Cursor |
+| Muse Code | Process detection (`exec --session-id` live model; bare TUI app-only) | — | Muse Code |
 
 If multiple tools are active together, the daemon submits presence only for the tool whose session was updated most recently and clears the others. Discord Desktop can display a single activity per user, so this keeps the harness you are actually using in view instead of a stale background process.
 

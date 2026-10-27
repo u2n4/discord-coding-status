@@ -19,12 +19,18 @@ export async function getForegroundPid(): Promise<number | null> {
     return null;
   }
 
+  // Verified signatures: GetForegroundWindow returns HWND/IntPtr (null/Zero when
+  // unknown); GetWindowThreadProcessId returns the thread id, zero on failure.
+  // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getforegroundwindow
+  // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowthreadprocessid
   const command = [
     'Add-Type -Namespace Win32 -Name ForegroundWindow -MemberDefinition \'',
     '[DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow();',
     ' [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint lpdwProcessId);',
-    '\'; $window = [Win32.ForegroundWindow]::GetForegroundWindow();',
-    ' $owner = 0; [void][Win32.ForegroundWindow]::GetWindowThreadProcessId($window, [ref]$owner);',
+    '\' | Out-Null; $window = [Win32.ForegroundWindow]::GetForegroundWindow();',
+    ' $owner = [uint32]0; $threadId = 0;',
+    ' if ($window -ne $null -and $window -ne [IntPtr]::Zero) { $threadId = [Win32.ForegroundWindow]::GetWindowThreadProcessId($window, [ref]$owner); }',
+    ' if ($threadId -eq 0) { $owner = 0 };',
     ' Write-Output $owner'
   ].join('');
 

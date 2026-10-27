@@ -249,7 +249,7 @@ test('grok PostToolUse maps to Finished <tool> and SessionStart stays active', a
   assert.equal(state.sessions['grok-start'].status, 'running');
 });
 
-test('grok resolves model and effort from cache and config when available', async (t) => {
+test('grok ignores unbound cache/config models and stays app-only without explicit input', async (t) => {
   const { env } = createTestEnvironment(t);
   const grokDir = path.dirname(GROK_HOOKS_DIR);
   fs.mkdirSync(grokDir, { recursive: true });
@@ -282,8 +282,8 @@ test('grok resolves model and effort from cache and config when available', asyn
   );
   const state = JSON.parse((await runCli(['state'], env)).stdout);
   assert.equal(state.sessions['grok-model-test'].tool, 'grok');
-  assert.equal(state.sessions['grok-model-test'].model, 'Grok 4.6');
-  assert.equal(state.sessions['grok-model-test'].effort, 'high');
+  assert.equal(state.sessions['grok-model-test'].model, undefined, 'first-key cache guess must not publish');
+  assert.equal(state.sessions['grok-model-test'].effort, undefined, 'cache effort guess must not publish');
 });
 
 test('claude-hook delegates to grok when invoked in grok environment', async (t) => {

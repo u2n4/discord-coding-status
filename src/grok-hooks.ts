@@ -146,7 +146,8 @@ export function installManagedGrokHooks(scriptPath: string): ManagedGrokHookMuta
   }
 
   fs.mkdirSync(GROK_HOOKS_DIR, { recursive: true });
-  fs.writeFileSync(GROK_HOOKS_FILE, `${JSON.stringify({ hooks }, null, 2)}\n`);
+  fs.writeFileSync(GROK_HOOKS_FILE, `${JSON.stringify({ hooks }, null, 2)}
+`);
 
   return {
     hooksFile: GROK_HOOKS_FILE,
@@ -273,50 +274,16 @@ export function resolveGrokModelAndEffort(
   const inputModel = input ? findStringDeep(input, ['model', 'model_name', 'modelName', 'model_id', 'modelId']) : null;
   const inputEffort = input ? findStringDeep(input, ['effort', 'reasoning_effort', 'reasoningEffort', 'model_reasoning_effort', 'modelReasoningEffort']) : null;
 
-  let model: string | null = argModel || inputModel || null;
-  let effort: string | null = argEffort || inputEffort || null;
-
-  if (!model) {
-    try {
-      const grokDir = GROK_HOOKS_DIR ? path.dirname(GROK_HOOKS_DIR) : path.join(os.homedir(), '.grok');
-      const modelsCacheFile = path.join(grokDir, 'models_cache.json');
-      if (fs.existsSync(modelsCacheFile)) {
-        const parsed = JSON.parse(fs.readFileSync(modelsCacheFile, 'utf8')) as Record<string, unknown>;
-        const models = asRecord(parsed?.models);
-        if (models) {
-          const firstKey = Object.keys(models)[0];
-          const firstModel = asRecord(models[firstKey]);
-          const info = asRecord(firstModel?.info);
-          if (info) {
-            model = typeof info.name === 'string' && info.name.trim()
-              ? info.name.trim()
-              : (typeof info.id === 'string' && info.id.trim() ? info.id.trim() : null);
-            if (!effort && typeof info.reasoning_effort === 'string' && info.reasoning_effort.trim()) {
-              effort = info.reasoning_effort.trim();
-            }
-          }
-        }
-      }
-    } catch (_) {
-      // Ignore cache read errors
-    }
-  }
-
-  if (!model) {
-    try {
-      const grokDir = GROK_HOOKS_DIR ? path.dirname(GROK_HOOKS_DIR) : path.join(os.homedir(), '.grok');
-      const configFile = path.join(grokDir, 'config.toml');
-      if (fs.existsSync(configFile)) {
-        const content = fs.readFileSync(configFile, 'utf8');
-        const match = content.match(/(?:model|fork_secondary_model)\s*=\s*"([^"]+)"/);
-        if (match?.[1]?.trim()) {
-          model = match[1].trim();
-        }
-      }
-    } catch (_) {
-      // Ignore config read errors
-    }
-  }
+  // Bound-only: explicit --model/hook input for THIS session event. The old
+  // models_cache first-key fallback was arbitrary catalog order (not the
+  // current session) and the config.toml default also matched
+  // fork_secondary_model (never the current model); both are removed.
+  // Unresolved limitation: no session-bound Grok model metadata path is
+  // currently proven (observed hook inputs carry no model; no transcript or
+  // session file format with session/PID binding is documented in-repo), so
+  // unknown stays app-only rather than fabricating a model.
+  const model: string | null = argModel || inputModel || null;
+  const effort: string | null = argEffort || inputEffort || null;
 
   return {
     model: model || undefined,

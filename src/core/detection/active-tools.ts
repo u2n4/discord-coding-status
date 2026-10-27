@@ -183,6 +183,7 @@ export function detectActiveTools(
         source: 'process',
         providerId: selected.provider.id,
         processInfo: selected.processInfo,
+        processAmbiguous: rankedCandidates.filter((candidate) => selected.provider.process?.matches(candidate)).length > 1 ? true : undefined,
         // Process-detected tools have no hook timestamps; stamp them with the
         // detection time so the newest-session selection orders two process
         // tools sensibly. This timestamp is re-stamped every poll, so it must

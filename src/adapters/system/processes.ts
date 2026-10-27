@@ -24,10 +24,54 @@ export async function getProcessList(): Promise<ProcessInfo[]> {
     .filter((processInfo): processInfo is ProcessInfo => Boolean(processInfo));
 }
 
+// Shared CIM JSON parser: mirrors getWindowsProcessList row mapping so the
+// targeted foreground refresh in process-cache reuses identical semantics.
+export function parseWindowsProcessListJson(stdout: string): ProcessInfo[] {
+  if (!stdout.trim()) {
+    return [];
+  }
+
+  const parsed = JSON.parse(stdout) as unknown;
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+
+  return rows
+    .map((row): ProcessInfo | null => {
+      const record = asRecord(row);
+      const parsedPid = extractNumberLike(record?.ProcessId);
+      if (parsedPid === null) {
+        return null;
+      }
+
+      const parsedPpid = extractNumberLike(record?.ParentProcessId);
+      const parsedCommandLine = extractString(record?.CommandLine);
+      const parsedExecutablePath = extractString(record?.ExecutablePath);
+      const parsedLine = [parsedExecutablePath, parsedCommandLine].filter(Boolean).join(' ');
+
+      if (!parsedLine) {
+        return null;
+      }
+
+      const parsedUserTicks = extractNumberLike(record?.UserModeTime) || 0;
+      const parsedKernelTicks = extractNumberLike(record?.KernelModeTime) || 0;
+
+      return {
+        pid: parsedPid,
+        ppid: parsedPpid ?? undefined,
+        line: parsedLine,
+        raw: parsedLine,
+        executablePath: parsedExecutablePath,
+        commandLine: parsedCommandLine,
+        cpuMs: (parsedUserTicks + parsedKernelTicks) / 10_000,
+        createdAtMs: parseCreationDate(record?.CreationDate)
+      };
+    })
+    .filter((processInfo): processInfo is ProcessInfo => Boolean(processInfo));
+}
+
 async function getWindowsProcessList(): Promise<ProcessInfo[]> {
   const command = [
     '@(Get-CimInstance Win32_Process |',
-    'Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,UserModeTime,KernelModeTime) |',
+    'Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,UserModeTime,KernelModeTime,CreationDate) |',
     'ConvertTo-Json -Compress'
   ].join(' ');
   const { stdout } = await execFileAsync('powershell.exe', [
@@ -76,7 +120,8 @@ async function getWindowsProcessList(): Promise<ProcessInfo[]> {
         raw: line,
         executablePath,
         commandLine,
-        cpuMs: (userModeTicks + kernelModeTicks) / 10_000
+        cpuMs: (userModeTicks + kernelModeTicks) / 10_000,
+        createdAtMs: parseCreationDate(record?.CreationDate)
       };
     })
     .filter((processInfo): processInfo is ProcessInfo => Boolean(processInfo));
@@ -95,6 +140,23 @@ function extractString(value: unknown): string | null {
 function extractNumberLike(value: unknown): number | null {
   const number = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(number) ? number : null;
+}
+
+function parseCreationDate(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 1e12 && value < 1e13) {
+    return Math.round(value);
+  }
+  if (typeof value !== 'string' || !value.trim()) {
+    return undefined;
+  }
+  const text = value.trim();
+  const netMatch = text.match(/\/Date\((-?\d+)(?:[+-]\d{4})?\)\//);
+  if (netMatch) {
+    const millis = Number(netMatch[1]);
+    return Number.isFinite(millis) && millis > 0 ? millis : undefined;
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function parseProcessLine(line: string): ProcessInfo | null {

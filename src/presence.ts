@@ -26,6 +26,7 @@ import {
 import {
   cleanupStateSessions,
   coerceStateTimestamp,
+  debugLog,
   log,
   readStateFile
 } from './state-store';
@@ -38,6 +39,7 @@ import {
   toolProviders
 } from './providers/registry';
 import { discordApplicationForTool } from './providers/discord';
+import { readMuseExecModelForProcess } from './providers/muse/model';
 import type { ActiveTool } from './core/tools/types';
 import type {
   PackageInfo,
@@ -493,8 +495,19 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
   // model id. No activity, project, branch, quota, context, package, emoji,
   // session counts, or timestamps are ever sent to Discord.
   // Model is shown ONLY when positively bound (hook/session tool.model).
-  // Process-detected Codex Desktop and Muse have no PID binding: app-only.
-  const model = modelTextForPresence(tool);
+  // Process-detected Codex Desktop stays app-only (rollouts carry no PID). Process Muse shows a model ONLY for positively bound headless exec --session-id processes (UUID command line to exact session log with open-segment, PID, and freshness guards); bare TUI stays app-only.
+  let model = modelTextForPresence(tool);
+  if (!model && tool.source === 'process' && tool.family === 'muse' && !tool.processAmbiguous && tool.processInfo) {
+    let resolved: string | null = null;
+    try {
+      resolved = readMuseExecModelForProcess(tool.processInfo)?.model || null;
+    } catch (_) {
+      resolved = null;
+    }
+    if (resolved) {
+      model = truncatePresenceText(resolved);
+    }
+  }
 
   return {
     ...tool,
@@ -539,10 +552,10 @@ function largeImageKeyForTool(tool: ActiveTool): string | null {
   return application?.imageKey || LARGE_IMAGE_KEY || null;
 }
 
-function getActivitySignature(tool: ActiveTool): string {
+export function getActivitySignature(tool: ActiveTool): string {
   return [
     clientIdForTool(tool),
-    tool.key,
+    // tool.key excluded: dedup on outbound payload+app, not alias/session key.
     tool.details,
     tool.state,
     largeImageKeyForTool(tool),
@@ -570,7 +583,7 @@ export async function clearConnectionActivity(clientId: string, state: RpcConnec
 async function updateActivityForClient(clientId: string, tool: ActiveTool): Promise<void> {
   const state = rpcStateForClientId(clientId);
 
-  if (state.activeToolKey !== tool.key) {
+  if (state.activeToolKey !== tool.key && getActivitySignature(tool) !== state.lastSentActivitySignature) {
     state.activeToolKey = tool.key;
     state.lastSentActivitySignature = null;
     state.lastCleared = false;
@@ -647,14 +660,31 @@ export async function updateActivities(tools: ActiveTool[], preferredFamily: str
   const newest = selectNewestTool(displayable, preferredFamily);
   const newestClientId = newest ? clientIdForTool(newest) : null;
 
+  if (!newest || !newestClientId) {
+    for (const [clientId, state] of rpcConnections) {
+      await clearConnectionActivity(clientId, state);
+    }
+    return;
+  }
+
+  // Publish the new target BEFORE clearing the previous app: clearing first
+  // blanks Discord whenever the new connection is not ready yet. When the new
+  // target cannot publish (Discord down/connecting), the previous activity is
+  // retained and the next pass retries. No invented rate limit is applied;
+  // rapid events are coalesced by the caller and RPC errors/backpressure are
+  // respected by leaving the signature unset for retry.
+  await updateActivityForClient(newestClientId, newest);
+
+  const published = rpcStateForClientId(newestClientId);
+  if (!published.ready || published.lastSentActivitySignature === null) {
+    debugLog(`Retaining previous activity; ${labelForClientId(newestClientId)} is not ready yet.`);
+    return;
+  }
+
   for (const [clientId, state] of rpcConnections) {
     if (clientId !== newestClientId) {
       await clearConnectionActivity(clientId, state);
     }
-  }
-
-  if (newest && newestClientId) {
-    await updateActivityForClient(newestClientId, newest);
   }
 }
 

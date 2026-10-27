@@ -15,6 +15,8 @@ process.env.CODEX_HOME = path.join(scratch, 'codex-home');
 process.env.DISCORD_CODING_STATUS_STATE_MAX_AGE_MS = '900000';
 
 const { enrichToolForPresence } = require('../dist/presence');
+const { detectActiveTools } = require('../dist/core/detection/active-tools');
+const { toolProviders } = require('../dist/providers/registry');
 const { readActiveMuseModel } = require('../dist/providers/muse/model');
 
 function freshScratch(t) {
@@ -127,6 +129,146 @@ test('ONE single fresh Codex rollout cannot label the desktop app', async (t) =>
   const enriched = await enrichToolForPresence(processTool('codex', 'codexApp', 'codexApp'));
   assert.equal(enriched.details, '', 'a single unbound rollout is not attribution');
   assert.equal(enriched.state, '');
+});
+
+const EXEC_UUID = 'd2aca6d9-1154-4e8d-97ad-77b53b120aba';
+
+function execProcessInfo(pid, uuid, createdAtMs) {
+  const cmd = `/usr/local/bin/muse exec --session-id ${uuid} "do work"`;
+  return {
+    pid,
+    line: cmd,
+    raw: cmd,
+    executablePath: '/usr/local/bin/muse',
+    commandLine: cmd,
+    createdAtMs
+  };
+}
+
+function writeMuseExecSession(sessionId, pid, modelId, startedAtMs, extraRecords) {
+  const micros = (ms) => ms * 1000;
+  const records = [
+    {
+      schema_version: 1,
+      stream: { kind: 'session', id: sessionId },
+      sequence: 4,
+      recorded_at: micros(startedAtMs + 10),
+      payload_type: 'runtime.session.route_facts',
+      payload: { kind: 'route_facts', record: { pid } }
+    },
+    {
+      schema_version: 1,
+      stream: { kind: 'session', id: sessionId },
+      sequence: 28,
+      recorded_at: micros(startedAtMs + 1000),
+      payload_type: 'run.model.configured',
+      payload: { kind: 'run_model', record: { model_id: modelId } }
+    },
+    ...(extraRecords || [])
+  ];
+  const directory = path.join(museSessionsRoot(), '2026', '10', '27', sessionId);
+  fs.mkdirSync(directory, { recursive: true });
+  const file = path.join(directory, 'session.jsonl');
+  fs.writeFileSync(file, records.map((record) => JSON.stringify(record)).join('\n') + '\n');
+  return file;
+}
+
+function museExecTool(processInfo) {
+  return {
+    key: 'museCli',
+    family: 'muse',
+    providerId: 'museCli',
+    source: 'process',
+    details: 'Using Muse',
+    state: 'Muse Code',
+    processInfo
+  };
+}
+
+test('a positively bound exec process shows its exact session model', async (t) => {
+  freshScratch(t);
+  const startedAt = Date.now();
+  writeMuseExecSession(EXEC_UUID, 42712, 'muse-spark-1.3', startedAt);
+  writeMuseSession('unrelated-session', ['muse-spark-9.9-unrelated']);
+
+  const enriched = await enrichToolForPresence(museExecTool(execProcessInfo(42712, EXEC_UUID, startedAt)));
+  assert.equal(enriched.details, 'Model: muse-spark-1.3');
+  assert.equal(enriched.state, '');
+});
+
+test('a bare TUI exec process with no UUID stays app-only', async (t) => {
+  freshScratch(t);
+  const startedAt = Date.now();
+  writeMuseExecSession(EXEC_UUID, 42712, 'muse-spark-1.3', startedAt);
+
+  const bare = {
+    pid: 42799,
+    line: '/usr/local/bin/muse',
+    raw: '/usr/local/bin/muse',
+    executablePath: '/usr/local/bin/muse',
+    commandLine: '/usr/local/bin/muse',
+    createdAtMs: startedAt
+  };
+  const enriched = await enrichToolForPresence(museExecTool(bare));
+  assert.equal(enriched.details, '', 'no UUID means no binding, even with a fresh session file present');
+  assert.equal(enriched.state, '');
+
+  const noFlagExec = {
+    pid: 42800,
+    line: '/usr/local/bin/muse exec "do work"',
+    raw: '/usr/local/bin/muse exec "do work"',
+    executablePath: '/usr/local/bin/muse',
+    commandLine: '/usr/local/bin/muse exec "do work"',
+    createdAtMs: startedAt
+  };
+  const enrichedExec = await enrichToolForPresence(museExecTool(noFlagExec));
+  assert.equal(enrichedExec.details, '', 'exec without --session-id stays app-only');
+});
+
+test('an exec process whose session ended stays app-only', async (t) => {
+  freshScratch(t);
+  const startedAt = Date.now();
+  writeMuseExecSession(EXEC_UUID, 42712, 'muse-spark-1.3', startedAt - 60000, [
+    {
+      schema_version: 1,
+      stream: { kind: 'session', id: EXEC_UUID },
+      sequence: 68,
+      recorded_at: (startedAt - 59000) * 1000,
+      payload_type: 'session.end',
+      payload: { kind: 'session_end', record: { session_id: EXEC_UUID } }
+    }
+  ]);
+
+  const enriched = await enrichToolForPresence(museExecTool(execProcessInfo(42712, EXEC_UUID, startedAt)));
+  assert.equal(enriched.details, '', 'ended session model must not leak to a live reused UUID');
+  assert.equal(enriched.state, '');
+});
+
+test('multiple Muse processes omit the model on ambiguity', async (t) => {
+  freshScratch(t);
+  const startedAt = Date.now();
+  writeMuseExecSession(EXEC_UUID, 42712, 'muse-spark-1.3', startedAt);
+
+  const exec = execProcessInfo(42712, EXEC_UUID, startedAt);
+  const bareTui = {
+    pid: 42799,
+    line: '/usr/local/bin/muse',
+    raw: '/usr/local/bin/muse',
+    executablePath: '/usr/local/bin/muse',
+    commandLine: '/usr/local/bin/muse',
+    createdAtMs: startedAt
+  };
+  const tools = detectActiveTools([exec, bareTui], toolProviders, { idleGraceMs: 5 * 60_000, activeCpuMs: 0 });
+  const muse = tools.find((tool) => tool.family === 'muse');
+  assert.ok(muse);
+  assert.equal(muse.processAmbiguous, true, 'two Muse processes mark the tool ambiguous');
+
+  const enriched = await enrichToolForPresence({ ...museExecTool(exec), processAmbiguous: true });
+  assert.equal(enriched.details, '', 'a bound background exec must not label an unknown foreground TUI');
+  assert.equal(enriched.state, '');
+
+  const single = detectActiveTools([exec], toolProviders, { idleGraceMs: 5 * 60_000, activeCpuMs: 0 });
+  assert.equal(single.find((tool) => tool.family === 'muse').processAmbiguous, undefined);
 });
 
 test('an explicit hook model still wins over ambiguous session files', async (t) => {

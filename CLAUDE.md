@@ -23,8 +23,9 @@ prettified); unknown model = application name only.
 | Codex CLI | Lifecycle hooks + process | Hook input / transcript `turn_context` |
 | Codex Desktop app | ChatGPT.exe in `OpenAI.Codex_*` (Classic excluded) | None — app-only (rollouts carry no PID; hook model only if Desktop ever fires one) |
 | Claude Code | Lifecycle hooks + process | Hook input / transcript tail |
-| Muse Code | `muse` / `muse-bin-*.exe` process | None — app-only (sessions carry no PID; explicit hook `--model` only) |
-| Grok Code | Lifecycle hooks + process | Hook input / models cache / config |
+| Claude Desktop app | Claude.exe foreground window/process/package + UI Automation | Model selector button first text child (positive HWND/PID binding; Menu/ambiguous/missing fail closed to app-only); background CLI hook never overrides |
+| Muse Code | `muse` / `muse-bin-*.exe` process | Headless `exec --session-id <UUID>` only (UUID command line to exact session log with open-segment, PID, freshness guards); bare TUI stays app-only (no PID binding); explicit hook `--model` still wins |
+| Grok Code | Lifecycle hooks + process | Hook input explicit model only (cache first-key + config/fork guesses removed; unbound stays app-only) |
 | OpenCode / Cursor / Pi | Process only | None (application name only) |
 
 Selection: hook sessions outrank process detection; the Windows foreground
