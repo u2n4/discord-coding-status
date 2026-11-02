@@ -37,7 +37,8 @@ import {
   ANTIGRAVITY_HOOK_EVENTS,
   getManagedAntigravityHookStatus,
   installManagedAntigravityHooks,
-  removeManagedAntigravityHooks
+  removeManagedAntigravityHooks,
+  writeAntigravityHooksFile
 } from './antigravity-hooks';
 import { toolProviders } from './providers/registry';
 
@@ -174,7 +175,7 @@ export const antigravityHookInstaller: HookInstaller = {
   uninstall: () => {
     const result = removeManagedAntigravityHooks();
     if (result.removed > 0) {
-      fs.writeFileSync(ANTIGRAVITY_HOOKS_FILE, `${JSON.stringify(result.config, null, 2)}\n`, { mode: 0o600 });
+      writeAntigravityHooksFile(ANTIGRAVITY_HOOKS_FILE, result.config);
     }
     return { target: ANTIGRAVITY_HOOKS_FILE, removed: result.removed };
   },

@@ -124,24 +124,14 @@ function readCachedCodexModelFile(
   }
 }
 
+// Codex CLI: the top-level `model` in config.toml is the persisted default
+// (`/model` writes it). The Desktop composer state is never consulted for the
+// CLI, because it records Desktop picks, not the CLI session.
 export function readCodexConfiguredModel(): CodexConfiguredModel | null {
-  let best: CodexConfiguredModel | null = null;
+  return readCachedCodexModelFile(getCodexConfigFilePath(), parseCodexConfigTomlModel);
+}
 
-  const configCandidate = readCachedCodexModelFile(
-    getCodexConfigFilePath(),
-    parseCodexConfigTomlModel
-  );
-  if (configCandidate) {
-    best = configCandidate;
-  }
-
-  const globalStateCandidate = readCachedCodexModelFile(
-    getCodexGlobalStateFilePath(),
-    parseCodexGlobalStateModel
-  );
-  if (globalStateCandidate && (!best || globalStateCandidate.mtimeMs > best.mtimeMs)) {
-    best = globalStateCandidate;
-  }
-
-  return best;
+// Codex Desktop: the most recent composer pick in .codex-global-state.json.
+export function readCodexDesktopModel(): CodexConfiguredModel | null {
+  return readCachedCodexModelFile(getCodexGlobalStateFilePath(), parseCodexGlobalStateModel);
 }

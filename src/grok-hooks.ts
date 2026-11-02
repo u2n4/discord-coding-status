@@ -265,6 +265,23 @@ export function activityFromGrokHook(event: string, toolName: string | null): st
   return null;
 }
 
+// Session-identifying keys (model, session id, cwd, event name) are read from
+// the TOP LEVEL of the hook input only. A deep search would pick nested
+// `tool_input.model` / `tool_input.cwd` / `tool_input.session_id` arguments of a
+// PreToolUse call and publish them as the Grok session's own metadata.
+function topLevelString(input: Record<string, unknown> | undefined, keys: string[]): string | null {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+  for (const key of keys) {
+    const value = input[key];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
 export function resolveGrokModelAndEffort(
   input?: Record<string, unknown>,
   args?: Record<string, string | boolean>
@@ -272,8 +289,8 @@ export function resolveGrokModelAndEffort(
   const argModel = args ? getArgString(args, 'model') : null;
   const argEffort = args ? (getArgString(args, 'effort') || getArgString(args, 'reasoning-effort')) : null;
 
-  const inputModel = input ? findStringDeep(input, ['model', 'model_name', 'modelName', 'model_id', 'modelId']) : null;
-  const inputEffort = input ? findStringDeep(input, ['effort', 'reasoning_effort', 'reasoningEffort', 'model_reasoning_effort', 'modelReasoningEffort']) : null;
+  const inputModel = topLevelString(input, ['model', 'model_name', 'modelName', 'model_id', 'modelId']);
+  const inputEffort = topLevelString(input, ['effort', 'reasoning_effort', 'reasoningEffort', 'model_reasoning_effort', 'modelReasoningEffort']);
 
   // Bound-only: explicit --model/hook input for THIS session event. The old
   // models_cache first-key fallback was arbitrary catalog order (not the
@@ -284,9 +301,9 @@ export function resolveGrokModelAndEffort(
   // session file format with session/PID binding is documented in-repo), so
   // unknown stays app-only rather than fabricating a model.
   const sessionId = (args ? (getArgString(args, 'session-id') || getArgString(args, 'session_id')) : null)
-    || (input ? findStringDeep(input, ['session_id', 'sessionId']) : null);
+    || topLevelString(input, ['session_id', 'sessionId']);
   const cwd = (args ? getArgString(args, 'cwd') : null)
-    || (input ? findStringDeep(input, ['cwd', 'current_working_directory', 'working_directory', 'workspace', 'workspaceRoot']) : null);
+    || topLevelString(input, ['cwd', 'current_working_directory', 'working_directory', 'workspace', 'workspaceRoot']);
   const summaryModel = sessionId ? readGrokSessionSummaryModel(sessionId, cwd)?.model || null : null;
   const model: string | null = argModel || inputModel || summaryModel || null;
   const effort: string | null = argEffort || inputEffort || null;
@@ -303,16 +320,16 @@ export function resolveGrokModelAndEffort(
 export function grokHookSessionFromArgs(args: Record<string, string | boolean>): HookSessionState {
   const input = readHookInput();
   const event = getArgString(args, 'event')
-    || findStringDeep(input, ['hook_event_name', 'hook_event', 'hookEvent', 'event'])
+    || topLevelString(input, ['hook_event_name', 'hook_event', 'hookEvent', 'event'])
     || 'unknown';
   const cwd = path.resolve(
     getArgString(args, 'cwd')
-      || findStringDeep(input, ['cwd', 'current_working_directory', 'working_directory', 'workspace', 'workspaceRoot'])
+      || topLevelString(input, ['cwd', 'current_working_directory', 'working_directory', 'workspace', 'workspaceRoot'])
       || process.cwd()
   );
   const sessionId = getArgString(args, 'session-id')
     || getArgString(args, 'session_id')
-    || findStringDeep(input, ['session_id', 'sessionId'])
+    || topLevelString(input, ['session_id', 'sessionId'])
     || `grok:cli:${cwd}:${process.ppid}`;
   const toolName = findStringDeep(input, ['tool_name', 'toolName', 'tool']);
   const { model, effort } = resolveGrokModelAndEffort(input, args);

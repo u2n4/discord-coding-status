@@ -70,17 +70,17 @@ function childrenByParent(processes: readonly ProcessInfo[]): Map<number, Proces
 }
 
 /**
- * Finds the tool family that owns the foreground window. Terminal-hosted CLI
- * sessions own no window themselves, so descendants of the foreground PID
+ * Collects every tool family that owns the foreground window. Terminal-hosted
+ * CLI sessions own no window themselves, so descendants of the foreground PID
  * (terminal -> shell -> agent, a few levels deep) are considered as well.
- * Returns null when the foreground process is not a known tool or when
- * several tool families share it (ambiguous split panes).
+ * Several families mean one host (e.g. WindowsTerminal.exe tabs) runs more
+ * than one tool; the caller decides how to break that tie.
  */
-export function familyForForegroundProcess(
+export function familiesForForegroundProcess(
   foregroundPid: number,
   processes: readonly ProcessInfo[],
   providers: readonly ToolProvider[]
-): ToolFamily | null {
+): ToolFamily[] {
   const byPid = new Map<number, ProcessInfo>();
   for (const process of processes) {
     byPid.set(process.pid, process);
@@ -88,7 +88,7 @@ export function familyForForegroundProcess(
 
   const root = byPid.get(foregroundPid);
   if (!root) {
-    return null;
+    return [];
   }
 
   const children = childrenByParent(processes);
@@ -113,7 +113,54 @@ export function familyForForegroundProcess(
     }
   }
 
-  return families.size === 1 ? [...families][0] : null;
+  return [...families];
+}
+
+/**
+ * Finds the ONE tool family that owns the foreground window. Returns null
+ * when the foreground process is not a known tool or when several tool
+ * families share it (ambiguous split panes / terminal tabs); use
+ * familiesForForegroundProcess to see the candidates.
+ */
+export function familyForForegroundProcess(
+  foregroundPid: number,
+  processes: readonly ProcessInfo[],
+  providers: readonly ToolProvider[]
+): ToolFamily | null {
+  const families = familiesForForegroundProcess(foregroundPid, processes, providers);
+  return families.length === 1 ? families[0] : null;
+}
+
+/**
+ * Breaks a shared-host tie (Claude Code and Codex CLI in tabs of one
+ * WindowsTerminal.exe): among the candidate families, the one whose hook
+ * session reported most recently wins. Returns null when no candidate has hook
+ * activity (ambiguity stays unresolved; never a process-timestamp guess).
+ */
+export function pickAmbiguousForegroundFamily<T extends { family?: ToolFamily; source?: string; updatedAt?: number | null }>(
+  candidates: readonly ToolFamily[],
+  tools: readonly T[],
+  familyOf: (tool: T) => ToolFamily = (tool) => tool.family || 'other'
+): ToolFamily | null {
+  if (candidates.length < 2) {
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+  const allowed = new Set(candidates);
+  let best: { family: ToolFamily; at: number } | null = null;
+  for (const tool of tools) {
+    if (!tool || tool.source !== 'hook') {
+      continue;
+    }
+    const family = familyOf(tool);
+    if (!allowed.has(family)) {
+      continue;
+    }
+    const at = typeof tool.updatedAt === 'number' && Number.isFinite(tool.updatedAt) ? tool.updatedAt : 0;
+    if (at > 0 && (!best || at > best.at)) {
+      best = { family, at };
+    }
+  }
+  return best ? best.family : null;
 }
 
 /**

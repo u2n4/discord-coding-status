@@ -147,7 +147,7 @@ import {
   getNativeOpencodeQuotaText
 } from './quota';
 import { getGitBranch, readPackageInfo } from './presence';
-import { startDaemon } from './daemon';
+import { startDaemon, stopDaemonFromLock } from './daemon';
 
 function getInstallDirectory(): string {
   return path.join(CONFIG_DIR, 'app');
@@ -166,6 +166,25 @@ function getRuntimeScriptPath(baseDirectory = getPackageRoot()): string {
 
 let daemonStopAttempted = false;
 
+/**
+ * Escapes a literal for a single-quoted PowerShell `-like` pattern. `-like`
+ * treats `* ? [ ]` as wildcards and uses the backtick (not backslash) as its
+ * escape, so Windows paths keep their single backslashes; `'` is doubled for
+ * the single-quoted string.
+ */
+function powershellLikeLiteral(value: string): string {
+  return value.replace(/[*?[\]`]/g, (char) => `\`${char}`).replace(/'/g, "''");
+}
+
+// Stops only the daemon PID recorded in its lock (identity-verified) so a
+// following task /Run can take the lock.
+function stopManagedDaemonFromLock(): void {
+  const result = stopDaemonFromLock();
+  if (result === 'still-running') {
+    console.log(warning('The running daemon did not exit in time; the restarted daemon may refuse to start.'));
+  }
+}
+
 function stopRunningDaemonForUpdate(): void {
   if (isDaemonRestartSkipped()) {
     return;
@@ -177,13 +196,13 @@ function stopRunningDaemonForUpdate(): void {
     } catch (_) {}
 
     try {
-      const installDirPattern = getInstallDirectory().replace(/\\/g, '\\\\');
+      const installDirPattern = powershellLikeLiteral(getInstallDirectory());
       execFileSync('powershell.exe', [
         '-NoProfile',
         '-ExecutionPolicy',
         'Bypass',
         '-Command',
-        `Get-CimInstance Win32_Process | Where-Object { ($_.CommandLine -like "*discord-coding-status*daemon*" -or $_.CommandLine -like "*${installDirPattern}*") -and $_.ProcessId -ne ${process.pid} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`
+        `Get-CimInstance Win32_Process | Where-Object { ($_.CommandLine -like "*discord-coding-status*daemon*" -or $_.CommandLine -like '*${installDirPattern}*') -and $_.ProcessId -ne ${process.pid} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`
       ], { stdio: 'ignore' });
     } catch (_) {
       try {
@@ -617,7 +636,8 @@ function writeConfigEntries(
   const refreshResult = restartManagedDaemon({
     macosLaunchAgentId: MACOS_LAUNCH_AGENT_ID,
     windowsTaskName: getWindowsTaskName(),
-    skipRestart: options.skipRestart
+    skipRestart: options.skipRestart,
+    stopDaemon: stopManagedDaemonFromLock
   });
   printDaemonRefreshResult(refreshResult);
 }
@@ -893,7 +913,8 @@ async function main(): Promise<void> {
         restartManagedDaemon({
           macosLaunchAgentId: MACOS_LAUNCH_AGENT_ID,
           windowsTaskName: getWindowsTaskName(),
-          skipRestart: isDaemonRestartSkipped()
+          skipRestart: isDaemonRestartSkipped(),
+          stopDaemon: stopManagedDaemonFromLock
         });
       } catch (_) {
         // Best effort: the original setup error is what matters.
@@ -914,7 +935,8 @@ async function main(): Promise<void> {
     restartDaemon: () => restartManagedDaemon({
       macosLaunchAgentId: MACOS_LAUNCH_AGENT_ID,
       windowsTaskName: getWindowsTaskName(),
-      skipRestart: isDaemonRestartSkipped()
+      skipRestart: isDaemonRestartSkipped(),
+      stopDaemon: stopManagedDaemonFromLock
     })
   })) {
     process.exit(process.exitCode || 0);

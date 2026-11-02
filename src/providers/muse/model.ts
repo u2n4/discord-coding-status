@@ -234,47 +234,82 @@ export function extractMuseExecSessionId(process: ProcessInfo | string): string 
   return value.toLowerCase();
 }
 
-export function findMuseExecSessionFiles(sessionId: string): string[] {
-  if (!UUID_RE.test(sessionId)) {
-    return [];
+// Walk cache for findMuseExecSessionFiles, keyed by sessions root + session id.
+// The resolver runs on every fast presence pass (twice), so a full
+// year/month/day walk each time is wasteful. Muse creates a session directory
+// under the CURRENT date, so between full rescans only day directories at or
+// after the newest one seen need re-checking (walked newest-first, stopping at
+// the first older day). Cached matches are re-stat'ed so deletions drop out,
+// and a full rescan runs at least every MUSE_EXEC_FULL_RESCAN_MS.
+const MUSE_EXEC_FULL_RESCAN_MS = 30_000;
+const MUSE_EXEC_CACHE_LIMIT = 64;
+
+interface MuseExecListingCacheEntry {
+  files: string[];
+  newestDayKey: string | null;
+  fullScanAt: number;
+}
+
+const museExecListingCache = new Map<string, MuseExecListingCacheEntry>();
+
+function setBounded<T>(cache: Map<string, T>, key: string, value: T): void {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > MUSE_EXEC_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    cache.delete(oldest);
   }
-  const normalized = sessionId.toLowerCase();
-  const root = museSessionsRoot();
-  const matches: string[] = [];
-  let years: string[];
+}
+
+function readSortedDesc(dir: string, pattern: RegExp): string[] | null {
   try {
-    years = fs.readdirSync(root);
+    return fs.readdirSync(dir).filter((name) => pattern.test(name)).sort().reverse();
   } catch (_) {
-    return [];
+    return null;
   }
+}
+
+/**
+ * Newest-first walk of `<root>/YYYY/MM/DD/<uuid>/session.jsonl`. With
+ * `minDayKey` ("YYYY/MM/DD"), days older than it are not visited. Returns
+ * null when the root itself cannot be read.
+ */
+function scanMuseExecSessionDays(
+  root: string,
+  normalized: string,
+  minDayKey: string | null
+): { files: string[]; newestDayKey: string | null } | null {
+  const years = readSortedDesc(root, /^\d{4}$/);
+  if (!years) {
+    return null;
+  }
+  const files: string[] = [];
+  let newestDayKey: string | null = null;
   for (const year of years) {
-    if (!/^\d{4}$/.test(year)) {
-      continue;
+    if (minDayKey && year < minDayKey.slice(0, 4)) {
+      break;
     }
-    let months: string[];
-    try {
-      months = fs.readdirSync(path.join(root, year));
-    } catch (_) {
-      continue;
-    }
+    const months = readSortedDesc(path.join(root, year), /^\d{2}$/) ?? [];
     for (const month of months) {
-      if (!/^\d{2}$/.test(month)) {
-        continue;
+      if (minDayKey && `${year}/${month}` < minDayKey.slice(0, 7)) {
+        break;
       }
-      let days: string[];
-      try {
-        days = fs.readdirSync(path.join(root, year, month));
-      } catch (_) {
-        continue;
-      }
+      const days = readSortedDesc(path.join(root, year, month), /^\d{2}$/) ?? [];
       for (const day of days) {
-        if (!/^\d{2}$/.test(day)) {
-          continue;
+        const dayKey = `${year}/${month}/${day}`;
+        if (minDayKey && dayKey < minDayKey) {
+          break;
+        }
+        if (newestDayKey === null || dayKey > newestDayKey) {
+          newestDayKey = dayKey;
         }
         const file = path.join(root, year, month, day, normalized, 'session.jsonl');
         try {
           if (fs.statSync(file).isFile()) {
-            matches.push(file);
+            files.push(file);
           }
         } catch (_) {
           // Missing UUID directory under this date; keep looking.
@@ -282,7 +317,51 @@ export function findMuseExecSessionFiles(sessionId: string): string[] {
       }
     }
   }
-  return matches;
+  return { files, newestDayKey };
+}
+
+function isExistingFile(file: string): boolean {
+  try {
+    return fs.statSync(file).isFile();
+  } catch (_) {
+    return false;
+  }
+}
+
+export function findMuseExecSessionFiles(sessionId: string): string[] {
+  if (!UUID_RE.test(sessionId)) {
+    return [];
+  }
+  const normalized = sessionId.toLowerCase();
+  const root = museSessionsRoot();
+  const key = `${root}|${normalized}`;
+  const now = Date.now();
+  const cached = museExecListingCache.get(key);
+  const incremental = Boolean(
+    cached && now >= cached.fullScanAt && now - cached.fullScanAt < MUSE_EXEC_FULL_RESCAN_MS
+  );
+
+  const scan = scanMuseExecSessionDays(root, normalized, incremental && cached ? cached.newestDayKey : null);
+  if (!scan) {
+    museExecListingCache.delete(key);
+    return [];
+  }
+
+  let files = scan.files;
+  let newestDayKey = scan.newestDayKey;
+  let fullScanAt = now;
+  if (incremental && cached) {
+    const seen = new Set(files);
+    const survivors = cached.files.filter((file) => !seen.has(file) && isExistingFile(file));
+    files = [...files, ...survivors].sort().reverse();
+    if (cached.newestDayKey && (!newestDayKey || cached.newestDayKey > newestDayKey)) {
+      newestDayKey = cached.newestDayKey;
+    }
+    fullScanAt = cached.fullScanAt;
+  }
+
+  setBounded(museExecListingCache, key, { files, newestDayKey, fullScanAt });
+  return [...files];
 }
 
 function readHeadLines(file: string): string[] {
@@ -432,6 +511,51 @@ function readGuardedExecModel(file: string, sessionId: string, pid: number, crea
   return model;
 }
 
+// Guarded-read cache: the result of readGuardedExecModel is a pure function of
+// the file content (identified by path + mtimeMs + size) and the binding
+// inputs, so an unchanged file is never re-read (256 KB tail + 64 KB head).
+interface MuseExecModelCacheEntry {
+  mtimeMs: number;
+  size: number;
+  sessionId: string;
+  pid: number;
+  createdAtMs: number;
+  model: string | null;
+}
+
+const museExecModelCache = new Map<string, MuseExecModelCacheEntry>();
+
+function readGuardedExecModelCached(file: string, sessionId: string, pid: number, createdAtMs: number): string | null {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(file);
+  } catch (_) {
+    museExecModelCache.delete(file);
+    return null;
+  }
+  const cached = museExecModelCache.get(file);
+  if (
+    cached
+    && cached.mtimeMs === stat.mtimeMs
+    && cached.size === stat.size
+    && cached.sessionId === sessionId
+    && cached.pid === pid
+    && cached.createdAtMs === createdAtMs
+  ) {
+    return cached.model;
+  }
+  const model = readGuardedExecModel(file, sessionId, pid, createdAtMs);
+  setBounded(museExecModelCache, file, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    sessionId,
+    pid,
+    createdAtMs,
+    model
+  });
+  return model;
+}
+
 export function readMuseExecModelForProcess(process: ProcessInfo): MuseModelResult | null {
   const sessionId = extractMuseExecSessionId(process);
   if (!sessionId) {
@@ -451,9 +575,14 @@ export function readMuseExecModelForProcess(process: ProcessInfo): MuseModelResu
   }
   const passing: MuseModelResult[] = [];
   for (const file of files) {
-    const model = readGuardedExecModel(file, sessionId, pid, createdAtMs);
+    const model = readGuardedExecModelCached(file, sessionId, pid, createdAtMs);
     if (model) {
       passing.push({ model, sessionFile: file });
+      if (passing.length > 1) {
+        // Two passing logs are ambiguous: the result is null regardless of
+        // any further files, so stop reading.
+        return null;
+      }
     }
   }
   return passing.length === 1 ? passing[0] : null;

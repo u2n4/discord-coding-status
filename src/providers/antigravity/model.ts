@@ -10,9 +10,6 @@ export interface AntigravityModelResult {
   mtimeMs: number;
 }
 
-const HEAD_BYTES = 64 * 1024;
-const TAIL_BYTES = 256 * 1024;
-
 export function getAntigravityHomeDir(): string {
   const override = String(process.env.DISCORD_CODING_STATUS_ANTIGRAVITY_HOME || '').trim();
   if (override) {
@@ -48,103 +45,11 @@ export function normalizeAntigravityModel(value: unknown): string | null {
   return stripped;
 }
 
-const MODEL_SELECTION_REGEX = /changed setting `Model Selection` from [^\r\n]+? to `?([A-Za-z0-9][A-Za-z0-9 ._()+-]*?)(?:`|\.(?:\s|$)|[\r\n<]|$)/i;
-
-export function extractAntigravityModelFromTranscriptJsonl(text: string): string | null {
-  if (!text) {
-    return null;
-  }
-  const lines = text.split(/\r?\n/);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i].trim();
-    if (!line || !line.includes('Model Selection')) {
-      continue;
-    }
-
-    try {
-      const parsed = JSON.parse(line) as Record<string, unknown>;
-      if (parsed && typeof parsed === 'object') {
-        const source = typeof parsed.source === 'string' ? parsed.source : '';
-        const type = typeof parsed.type === 'string' ? parsed.type : '';
-        if (source === 'MODEL' || type === 'PLANNER_RESPONSE' || type === 'GENERIC') {
-          continue;
-        }
-      }
-      const content = typeof parsed?.content === 'string' ? parsed.content : '';
-      if (!content) {
-        continue;
-      }
-      const match = content.match(MODEL_SELECTION_REGEX);
-      if (match?.[1]) {
-        const normalized = normalizeAntigravityModel(match[1]);
-        if (normalized) {
-          return normalized;
-        }
-      }
-    } catch (_) {
-      if (line.includes('"source":"MODEL"') || line.includes('"type":"GENERIC"')) {
-        continue;
-      }
-      const match = line.match(MODEL_SELECTION_REGEX);
-      if (match?.[1]) {
-        const normalized = normalizeAntigravityModel(match[1]);
-        if (normalized) {
-          return normalized;
-        }
-      }
-    }
-  }
-  return null;
-}
-
-function readTranscriptSlices(filePath: string): { head: string; tail: string } {
-  let fd: number | null = null;
-  try {
-    fd = fs.openSync(filePath, 'r');
-    const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || stat.size <= 0) {
-      return { head: '', tail: '' };
-    }
-    const tailLength = Math.min(stat.size, TAIL_BYTES);
-    const tailOffset = Math.max(0, stat.size - tailLength);
-    const tailBuffer = Buffer.alloc(tailLength);
-    const tailBytesRead = fs.readSync(fd, tailBuffer, 0, tailLength, tailOffset);
-    const tail = tailBuffer.subarray(0, tailBytesRead).toString('utf8');
-
-    if (tailOffset === 0) {
-      return { head: '', tail };
-    }
-
-    const headLength = Math.min(tailOffset, HEAD_BYTES);
-    const headBuffer = Buffer.alloc(headLength);
-    const headBytesRead = fs.readSync(fd, headBuffer, 0, headLength, 0);
-    const head = headBuffer.subarray(0, headBytesRead).toString('utf8');
-    return { head, tail };
-  } catch (_) {
-    return { head: '', tail: '' };
-  } finally {
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch (_) {
-        // Ignore close errors.
-      }
-    }
-  }
-}
-
 interface TranscriptCandidate {
   filePath: string;
   mtimeMs: number;
 }
 
-interface CachedTranscriptModel {
-  mtimeMs: number;
-  size: number;
-  model: string | null;
-}
-
-const transcriptModelCache = new Map<string, CachedTranscriptModel>();
 let cachedActiveTranscript: { home: string; filePath: string | null; expiresAt: number } | null = null;
 let cachedBrainCandidates: { home: string; candidates: TranscriptCandidate[]; expiresAt: number } | null = null;
 
@@ -246,70 +151,180 @@ export function findActiveAntigravityTranscriptFile(): string | null {
   return best;
 }
 
-export const ANTIGRAVITY_PLACEHOLDER_MAP: Readonly<Record<string, string>> = Object.freeze({
-  MODEL_PLACEHOLDER_M124: 'Gemini 3.8 Flash',
-  MODEL_PLACEHOLDER_M317: 'Gemini 3.8 Flash',
-  MODEL_PLACEHOLDER_M318: 'Gemini 3.8 Flash',
-  MODEL_PLACEHOLDER_M319: 'Gemini 3.8 Flash',
-  MODEL_PLACEHOLDER_M320: 'Gemini 3.8 Flash',
-  MODEL_PLACEHOLDER_M322: 'Gemini 3.8 Flash',
-  MODEL_PLACEHOLDER_M298: 'Gemini 3.7 Flash',
-  MODEL_PLACEHOLDER_M299: 'Gemini 3.7 Flash',
-  MODEL_PLACEHOLDER_M300: 'Gemini 3.7 Flash',
-  MODEL_PLACEHOLDER_M71: 'Gemini 3.6 Flash',
-  MODEL_PLACEHOLDER_M72: 'Gemini 3.6 Flash',
-  MODEL_PLACEHOLDER_M73: 'Gemini 3.6 Flash',
-  MODEL_PLACEHOLDER_M196: 'Gemini 3.6 Flash',
-  MODEL_PLACEHOLDER_M20: 'Gemini 3.5 Flash',
-  MODEL_PLACEHOLDER_M149: 'Gemini 3.5 Flash',
-  MODEL_PLACEHOLDER_M187: 'Gemini 3.5 Flash',
-  MODEL_PLACEHOLDER_M408: 'Gemini 4 Argon',
-  MODEL_PLACEHOLDER_M409: 'Gemini 4 Argon',
-  MODEL_PLACEHOLDER_M410: 'Gemini 4 Argon',
-  MODEL_PLACEHOLDER_M411: 'Gemini 4 Argon',
-  MODEL_PLACEHOLDER_M412: 'Gemini 4 Argon',
-  MODEL_PLACEHOLDER_M413: 'Gemini 4 Argon',
-  MODEL_PLACEHOLDER_M417: 'Gemini 4 Argon',
-  MODEL_PLACEHOLDER_M418: 'Gemini 4 Argon',
-  MODEL_PLACEHOLDER_M419: 'Gemini 4 Argon',
-  MODEL_PLACEHOLDER_M420: 'Gemini 4 Argon',
-  MODEL_PLACEHOLDER_M421: 'Gemini 4 Argon',
-  MODEL_PLACEHOLDER_M400: 'Claude Opus 5.5',
-  MODEL_PLACEHOLDER_M401: 'Claude Opus 5.5',
-  MODEL_PLACEHOLDER_M402: 'Claude Opus 5.5',
-  MODEL_PLACEHOLDER_M406: 'Claude Opus 5.5',
-  MODEL_PLACEHOLDER_M403: 'Claude Sonnet 5.5',
-  MODEL_PLACEHOLDER_M404: 'Claude Sonnet 5.5',
-  MODEL_PLACEHOLDER_M405: 'Claude Sonnet 5.5',
-  MODEL_PLACEHOLDER_M407: 'Claude Sonnet 5.5',
-  MODEL_PLACEHOLDER_M26: 'Claude Opus 4.6',
-  MODEL_PLACEHOLDER_M35: 'Claude Sonnet 4.6',
-  MODEL_PLACEHOLDER_M18: 'Gemini 3.1 Pro',
-  MODEL_PLACEHOLDER_M148: 'Gemini 3.1 Pro',
-  MODEL_GOOGLE_GEMINI_2_5_PRO: 'Gemini 3.1 Pro',
-  MODEL_PLACEHOLDER_M50: 'Gemini 2.5 Flash',
-  MODEL_PLACEHOLDER_M198: 'Gemini 2.5 Flash',
-  MODEL_GOOGLE_GEMINI_2_5_FLASH: 'Gemini 2.5 Flash',
-  MODEL_OPENAI_GPT_OSS_120B_MEDIUM: 'GPT OSS 120B'
+// Antigravity writes the dropdown pick to antigravity_state.pbtxt as an opaque
+// placeholder (MODEL_PLACEHOLDER_M402). Its own generation records
+// (conversations/<id>.db, table gen_metadata) pair that placeholder with the
+// provider model id that actually served the turn (claude-opus-5-5-high), so
+// the daemon learns the mapping from those records instead of guessing from
+// labels. Seeds below were read from those records on 2026-11-03; a
+// placeholder never seen in a record stays unresolved (app-only).
+export const ANTIGRAVITY_PLACEHOLDER_SEED: Readonly<Record<string, string>> = Object.freeze({
+  MODEL_PLACEHOLDER_M26: 'claude-opus-4-6-thinking',
+  MODEL_PLACEHOLDER_M71: 'gemini-3.6-flash',
+  MODEL_PLACEHOLDER_M132: 'gemini-3-flash-a',
+  MODEL_PLACEHOLDER_M133: 'gemini-3-flash-b',
+  MODEL_PLACEHOLDER_M298: 'gemini-3.7-flash',
+  MODEL_PLACEHOLDER_M318: 'gemini-3.8-flash-n',
+  MODEL_PLACEHOLDER_M401: 'claude-opus-5-5-medium',
+  MODEL_PLACEHOLDER_M402: 'claude-opus-5-5-high',
+  MODEL_PLACEHOLDER_M417: 'gemini-4-argon-trial',
+  MODEL_PLACEHOLDER_M418: 'gemini-4-argon-trial'
 });
+
+const PLACEHOLDER_PATTERN = /MODEL_PLACEHOLDER_M[1-9]\d*/;
+const PROVIDER_MODEL_PATTERN = /\b((?:claude|gemini|gpt)-[a-z0-9][a-z0-9.@-]{2,48})/;
+const MAX_LEARN_DATABASES = 8;
+const MAX_LEARN_ROWS = 300;
+const MAX_LEARN_ROW_BYTES = 20_000;
+const LEARN_RESCAN_MS = 5_000;
+
+interface LearnedDatabase {
+  mtimeMs: number;
+  size: number;
+  counts: Map<string, Map<string, number>>;
+}
+
+const learnedDatabases = new Map<string, LearnedDatabase>();
+let learnedMap: { home: string; map: Map<string, string>; expiresAt: number } | null = null;
+
+type SqliteModule = { DatabaseSync: new (file: string, options?: { readOnly?: boolean }) => any };
+let sqliteModule: SqliteModule | null | undefined;
+
+function loadSqlite(): SqliteModule | null {
+  if (sqliteModule !== undefined) {
+    return sqliteModule;
+  }
+  try {
+    // node:sqlite ships with Node 22.5+; older runtimes (no getBuiltinModule or
+    // no sqlite builtin) keep the seed map only.
+    const getBuiltin = (process as unknown as { getBuiltinModule?: (id: string) => unknown }).getBuiltinModule;
+    sqliteModule = (typeof getBuiltin === 'function' ? getBuiltin.call(process, 'node:sqlite') as SqliteModule : null) || null;
+  } catch (_) {
+    sqliteModule = null;
+  }
+  return sqliteModule;
+}
+
+// One gen_metadata blob -> [placeholder, provider model id], or null.
+export function pairFromGenerationRecord(blob: Uint8Array | null | undefined): [string, string] | null {
+  if (!blob || blob.byteLength === 0 || blob.byteLength > MAX_LEARN_ROW_BYTES) {
+    return null;
+  }
+  const text = Buffer.from(blob).toString('latin1');
+  const placeholder = text.match(PLACEHOLDER_PATTERN)?.[0];
+  const providerModel = text.match(PROVIDER_MODEL_PATTERN)?.[1];
+  if (!placeholder || !providerModel) {
+    return null;
+  }
+  return [placeholder, providerModel];
+}
+
+function learnFromDatabase(sqlite: SqliteModule, filePath: string, stat: fs.Stats): LearnedDatabase {
+  const counts = new Map<string, Map<string, number>>();
+  let db: any = null;
+  try {
+    db = new sqlite.DatabaseSync(filePath, { readOnly: true });
+    const rows = db
+      .prepare('SELECT data FROM gen_metadata WHERE size > 0 AND size <= ? ORDER BY idx DESC LIMIT ?')
+      .all(MAX_LEARN_ROW_BYTES, MAX_LEARN_ROWS) as Array<{ data: Uint8Array | null }>;
+    for (const row of rows) {
+      const pair = pairFromGenerationRecord(row.data);
+      if (!pair) {
+        continue;
+      }
+      const byModel = counts.get(pair[0]) || new Map<string, number>();
+      byModel.set(pair[1], (byModel.get(pair[1]) || 0) + 1);
+      counts.set(pair[0], byModel);
+    }
+  } catch (_) {
+    // Locked, mid-write or foreign schema: learn nothing from this file.
+  } finally {
+    try {
+      db?.close();
+    } catch (_) {}
+  }
+  return { mtimeMs: stat.mtimeMs, size: stat.size, counts };
+}
+
+export function resetAntigravityModelLearning(): void {
+  learnedDatabases.clear();
+  learnedMap = null;
+}
+
+function readLearnedPlaceholderMap(): Map<string, string> {
+  const home = getAntigravityHomeDir();
+  const now = Date.now();
+  if (learnedMap && learnedMap.home === home && learnedMap.expiresAt > now) {
+    return learnedMap.map;
+  }
+
+  const merged = new Map<string, Map<string, number>>();
+  const sqlite = loadSqlite();
+  if (sqlite) {
+    const dir = path.join(home, 'conversations');
+    let files: Array<{ filePath: string; stat: fs.Stats }> = [];
+    try {
+      files = fs.readdirSync(dir)
+        .filter((name) => name.endsWith('.db'))
+        .map((name) => {
+          const filePath = path.join(dir, name);
+          try {
+            return { filePath, stat: fs.statSync(filePath) };
+          } catch (_) {
+            return null;
+          }
+        })
+        .filter((entry): entry is { filePath: string; stat: fs.Stats } => Boolean(entry?.stat.isFile()))
+        .sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs)
+        .slice(0, MAX_LEARN_DATABASES);
+    } catch (_) {
+      files = [];
+    }
+    for (const { filePath, stat } of files) {
+      let learned = learnedDatabases.get(filePath);
+      if (!learned || learned.mtimeMs !== stat.mtimeMs || learned.size !== stat.size) {
+        learned = learnFromDatabase(sqlite, filePath, stat);
+        learnedDatabases.set(filePath, learned);
+      }
+      for (const [placeholder, byModel] of learned.counts) {
+        const target = merged.get(placeholder) || new Map<string, number>();
+        for (const [model, count] of byModel) {
+          target.set(model, (target.get(model) || 0) + count);
+        }
+        merged.set(placeholder, target);
+      }
+    }
+  }
+
+  const map = new Map<string, string>(Object.entries(ANTIGRAVITY_PLACEHOLDER_SEED));
+  for (const [placeholder, byModel] of merged) {
+    const best = [...byModel.entries()].sort((left, right) => right[1] - left[1])[0];
+    if (best) {
+      map.set(placeholder, best[0]);
+    }
+  }
+  learnedMap = { home, map, expiresAt: now + LEARN_RESCAN_MS };
+  return map;
+}
 
 export function getAntigravityStateFile(): string {
   return path.join(getAntigravityHomeDir(), 'antigravity_state.pbtxt');
 }
 
+export function parseAntigravityStatePlaceholder(text: string): string | null {
+  const match = text ? text.match(/last_selected_agent_model:\s*([A-Za-z0-9_]+)/) : null;
+  return match?.[1]?.trim() || null;
+}
+
+export function resolveAntigravityPlaceholder(placeholder: string | null): string | null {
+  if (!placeholder) {
+    return null;
+  }
+  return readLearnedPlaceholderMap().get(placeholder) || null;
+}
+
 export function parseAntigravityStateModel(text: string): string | null {
-  if (!text) {
-    return null;
-  }
-  const match = text.match(/last_selected_agent_model:\s*([A-Za-z0-9_]+)/);
-  if (!match?.[1]) {
-    return null;
-  }
-  const placeholder = match[1].trim();
-  if (ANTIGRAVITY_PLACEHOLDER_MAP[placeholder]) {
-    return ANTIGRAVITY_PLACEHOLDER_MAP[placeholder];
-  }
-  return normalizeAntigravityModel(placeholder);
+  return resolveAntigravityPlaceholder(parseAntigravityStatePlaceholder(text));
 }
 
 export function readAntigravityStateModel(): AntigravityModelResult | null {
@@ -319,8 +334,7 @@ export function readAntigravityStateModel(): AntigravityModelResult | null {
     if (!stat.isFile()) {
       return null;
     }
-    const text = fs.readFileSync(filePath, 'utf8');
-    const model = parseAntigravityStateModel(text);
+    const model = parseAntigravityStateModel(fs.readFileSync(filePath, 'utf8'));
     if (!model) {
       return null;
     }
@@ -334,83 +348,9 @@ export function readAntigravityStateModel(): AntigravityModelResult | null {
   }
 }
 
-export function readActiveAntigravityModel(
-  explicitTranscriptPath?: string | null
-): AntigravityModelResult | null {
-  const stateModel = readAntigravityStateModel();
-  if (stateModel) {
-    return stateModel;
-  }
-
-  const tried = new Set<string>();
-  const checkFile = (filePath: string): AntigravityModelResult | null => {
-    const resolved = path.resolve(filePath);
-    if (tried.has(resolved)) {
-      return null;
-    }
-    tried.add(resolved);
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(resolved);
-    } catch (_) {
-      transcriptModelCache.delete(resolved);
-      return null;
-    }
-    if (!stat.isFile()) {
-      return null;
-    }
-    const prev = transcriptModelCache.get(resolved);
-    if (prev && prev.mtimeMs === stat.mtimeMs && prev.size === stat.size) {
-      return prev.model ? { model: prev.model, filePath: resolved, mtimeMs: stat.mtimeMs } : null;
-    }
-    const { head, tail } = readTranscriptSlices(resolved);
-    const extracted =
-      extractAntigravityModelFromTranscriptJsonl(tail)
-      || extractAntigravityModelFromTranscriptJsonl(head);
-    const model = extracted || (prev && stat.size >= prev.size ? prev.model : null);
-    transcriptModelCache.set(resolved, { mtimeMs: stat.mtimeMs, size: stat.size, model });
-    if (!model) {
-      return null;
-    }
-    return {
-      model,
-      filePath: resolved,
-      mtimeMs: stat.mtimeMs
-    };
-  };
-
-  if (explicitTranscriptPath && explicitTranscriptPath.trim()) {
-    const direct = checkFile(explicitTranscriptPath.trim());
-    if (direct) {
-      return direct;
-    }
-  }
-
-  const activeFile = findActiveAntigravityTranscriptFile();
-  let activeMtimeMs = 0;
-  if (activeFile) {
-    try {
-      activeMtimeMs = fs.statSync(activeFile).mtimeMs;
-    } catch (_) {
-      activeMtimeMs = 0;
-    }
-    const fromActive = checkFile(activeFile);
-    if (fromActive) {
-      return fromActive;
-    }
-  }
-
-  const candidates = listBrainTranscriptCandidates(getAntigravityHomeDir());
-  for (const candidate of candidates.slice(0, 15)) {
-    const found = checkFile(candidate.filePath);
-    if (found) {
-      return {
-        model: found.model,
-        filePath: activeFile || found.filePath,
-        mtimeMs: Math.max(activeMtimeMs, found.mtimeMs)
-      };
-    }
-  }
-
-  return null;
+// The UI selection is the only model source: conversation transcripts carry
+// user text and tool output, so they are never mined for a model name. The
+// argument is kept for callers that pass a transcript path; it is ignored.
+export function readActiveAntigravityModel(_transcriptPath?: string | null): AntigravityModelResult | null {
+  return readAntigravityStateModel();
 }

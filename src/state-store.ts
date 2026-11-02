@@ -117,18 +117,23 @@ export function withStateLock<T>(operation: () => T): T {
 
   const lockPath = `${STATE_FILE}.lock`;
   const startedAt = Date.now();
+  // Unique owner token: the lock is only ever removed by whoever still owns
+  // this exact content, so a stale-lock breaker and the original holder can
+  // never delete each other's live lock.
+  const token = `${process.pid}:${startedAt}:${Math.random().toString(36).slice(2)}\n`;
   let fd: number | null = null;
 
   while (fd === null) {
     try {
       fd = fs.openSync(lockPath, 'wx');
-      fs.writeFileSync(fd, `${process.pid}\n`);
+      fs.writeFileSync(fd, token);
     } catch (error) {
       if (Date.now() - startedAt > STATE_LOCK_TIMEOUT_MS) {
         try {
+          const staleContent = fs.readFileSync(lockPath, 'utf8');
           const stat = fs.statSync(lockPath);
           if (Date.now() - stat.mtimeMs > STATE_LOCK_TIMEOUT_MS) {
-            fs.unlinkSync(lockPath);
+            unlinkLockIfContentMatches(lockPath, staleContent);
             continue;
           }
         } catch (_) {
@@ -149,11 +154,25 @@ export function withStateLock<T>(operation: () => T): T {
       fs.closeSync(fd);
     }
 
-    try {
-      fs.unlinkSync(lockPath);
-    } catch (_) {
-      // Another process may have cleaned a stale lock.
+    // Our lock may have been broken as stale (and re-taken by someone else)
+    // while the operation ran; only remove it while it is still ours.
+    unlinkLockIfContentMatches(lockPath, token);
+  }
+}
+
+/**
+ * Removes `lockPath` only while its content still equals `expected`. Returns
+ * true when the file was removed. Never throws.
+ */
+export function unlinkLockIfContentMatches(lockPath: string, expected: string): boolean {
+  try {
+    if (fs.readFileSync(lockPath, 'utf8') !== expected) {
+      return false;
     }
+    fs.unlinkSync(lockPath);
+    return true;
+  } catch (_) {
+    return false;
   }
 }
 

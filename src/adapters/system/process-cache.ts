@@ -1,9 +1,10 @@
 'use strict';
 
 import { execFile } from 'node:child_process';
+import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { ProcessInfo } from '../../core/tools/types';
-import { parseWindowsProcessListJson } from './processes';
+import { isProcessAlive, parseWindowsProcessListJson } from './processes';
 
 // Cached process snapshot for the fast focus/hook/model path.
 //
@@ -25,6 +26,27 @@ const MAX_DEDUP_ENTRIES = 128;
 const HOST_OR_AI_PROCESS_REGEX =
   /(?:windowsterminal|openconsole|conhost|pwsh|powershell|cmd\.exe|wt\.exe|wezterm|alacritty|mintty|cursor|code\.exe|claude|codex|chatgpt|grok|antigravity|muse|opencode|pi\.exe|node\.exe|bun\.exe)/i;
 
+// Executable basenames the slow Windows census always enumerates (mirrors the
+// Win32_Process filter in processes.ts). A retained process with one of these
+// names that is missing from a fresh census is dead (or its PID was reused).
+const CENSUS_EXECUTABLE_REGEX =
+  /^(?:(?:node|bun|claude|codex|chatgpt|grok|antigravity|cursor|opencode|pi|pwsh|powershell|cmd|windowsterminal|conhost|openconsole)\.exe|muse.*)$/i;
+
+function executableBasename(proc: ProcessInfo): string {
+  // Only the CIM ExecutablePath is trusted; without it the process is never
+  // treated as census-enumerated (it then survives only while alive).
+  return proc.executablePath ? path.win32.basename(proc.executablePath) : '';
+}
+
+/** True when the process is a terminal host or AI tool (worth a subtree walk). */
+export function isHostOrAiProcess(proc: ProcessInfo | null | undefined): boolean {
+  return Boolean(proc && HOST_OR_AI_PROCESS_REGEX.test(proc.line));
+}
+
+function isCensusEnumerated(proc: ProcessInfo): boolean {
+  return CENSUS_EXECUTABLE_REGEX.test(executableBasename(proc));
+}
+
 let cached: ProcessInfo[] = [];
 let byPid = new Map<number, ProcessInfo>();
 let cacheUpdatedAt = 0;
@@ -36,7 +58,7 @@ let lastRefreshMs = 0;
 
 const inFlightByPid = new Map<number, Promise<ProcessInfo[]>>();
 const lastAttemptByPid = new Map<number, number>();
-const retainedSubtreeByPid = new Map<number, { processes: ProcessInfo[]; expiresAt: number }>();
+const retainedSubtreeByPid = new Map<number, { processes: ProcessInfo[]; expiresAt: number; nonHostRoot?: boolean }>();
 
 export interface ProcessCacheStats {
   size: number;
@@ -62,15 +84,31 @@ export function setCachedProcessList(list: ProcessInfo[]): void {
   for (const process of list) {
     nextByPid.set(process.pid, process);
   }
+  // A fresh successful census is authoritative for every executable it
+  // enumerates: retained entries of those kinds that it no longer lists are
+  // dead and must not keep a tool "alive". Other retained entries (browser or
+  // game foreground roots the census never lists) survive only while their
+  // PID is still alive. Non-host roots are kept past the TTL so refocusing
+  // them never re-spawns a CIM query.
   for (const [rootPid, entry] of retainedSubtreeByPid) {
-    if (entry.expiresAt <= now) {
+    const survivors = entry.processes.filter((proc) => {
+      if (nextByPid.has(proc.pid)) {
+        return false;
+      }
+      if (isCensusEnumerated(proc)) {
+        return false;
+      }
+      return isProcessAlive(proc.pid);
+    });
+    const rootSurvives = survivors.some((proc) => proc.pid === rootPid);
+    const expired = entry.expiresAt <= now && !(entry.nonHostRoot && rootSurvives);
+    if (expired || !survivors.length) {
       retainedSubtreeByPid.delete(rootPid);
       continue;
     }
-    for (const proc of entry.processes) {
-      if (!nextByPid.has(proc.pid)) {
-        nextByPid.set(proc.pid, proc);
-      }
+    entry.processes = survivors;
+    for (const proc of survivors) {
+      nextByPid.set(proc.pid, proc);
     }
   }
   cached = [...nextByPid.values()];
@@ -88,6 +126,16 @@ export function getProcessCacheStats(): ProcessCacheStats {
     lastRefreshMs,
     inFlight: inFlightByPid.size
   };
+}
+
+/** Test seam: injects a retained subtree as if a targeted refresh returned it. */
+export function retainSubtreeForTests(rootPid: number, processes: ProcessInfo[], ttlMs = RETAINED_SUBTREE_TTL_MS): void {
+  retainedSubtreeByPid.set(rootPid, {
+    processes,
+    expiresAt: Date.now() + ttlMs,
+    nonHostRoot: processes.every((proc) => proc.pid === rootPid && !isHostOrAiProcess(proc))
+  });
+  upsertIntoCache(processes);
 }
 
 export function clearProcessCacheForTests(): void {
@@ -204,7 +252,9 @@ async function querySubtree(rootPid: number): Promise<ProcessInfo[]> {
 }
 
 // Merges the foreground subtree for an unknown PID into the cache. Known PIDs
-// are cache hits (no spawn). Concurrent and recent repeat requests for the
+// are cache hits (no spawn); a non-host root costs ONE root-only query for its
+// whole lifetime (retained until dead), so browser/game focus never repeats
+// the CIM spawn. Concurrent and recent repeat requests for the
 // same PID are deduped to one underlying query.
 export function refreshProcessForPid(pid: number): Promise<ProcessInfo[]> {
   if (!Number.isFinite(pid) || pid <= 0) {
@@ -246,7 +296,10 @@ export function refreshProcessForPid(pid: number): Promise<ProcessInfo[]> {
     .then((processes) => {
       retainedSubtreeByPid.set(pid, {
         processes,
-        expiresAt: Date.now() + RETAINED_SUBTREE_TTL_MS
+        expiresAt: Date.now() + RETAINED_SUBTREE_TTL_MS,
+        // A non-host root (browser, game, Discord) has no AI descendants to
+        // track; keep it until it dies so refocusing costs no new spawn.
+        nonHostRoot: processes.length > 0 && processes.every((proc) => proc.pid === pid && !isHostOrAiProcess(proc))
       });
       upsertIntoCache(processes);
       return processes;

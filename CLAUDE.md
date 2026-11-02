@@ -20,17 +20,18 @@ prettified); unknown model = application name only.
 
 | Tool | Active detection | Model source |
 |---|---|---|
-| Codex CLI | Lifecycle hooks + process | Hook input / transcript `turn_context` |
-| Codex Desktop app | ChatGPT.exe in `OpenAI.Codex_*` (Classic excluded) | None — app-only (rollouts carry no PID; hook model only if Desktop ever fires one) |
+| Codex CLI | Lifecycle hooks + process | Hook input / transcript `turn_context`; `config.toml` top-level `model` when newer than the hook (a `/model` change) or when the hook has none |
+| Codex Desktop app | ChatGPT.exe in `OpenAI.Codex_*` (Classic excluded) | Hook model if Desktop fires one, else the latest composer pick in `.codex-global-state.json` (verified live process only). The CLI never reads this file |
 | Claude Code | Lifecycle hooks + process | Hook input / transcript tail |
 | Claude Desktop app | Claude.exe foreground window/process/package + UI Automation | Model selector button first text child (positive HWND/PID binding; Menu/ambiguous/missing fail closed to app-only); background CLI hook never overrides |
-| Muse Code | Lifecycle hooks + process | Hook input `model` per bound session (receiver ancestor PID+creation binding; foreground-associated or retained instance wins, ambiguity fails app-only); headless `exec --session-id <UUID>` keeps its guarded process model; explicit hook `--model` still wins |
-| Grok Code | Lifecycle hooks + process | Hook input explicit model only (cache first-key + config/fork guesses removed; unbound stays app-only) |
+| Muse Code | Lifecycle hooks + process | Hook input `model` per bound session (global `settings.json` is never shown) (receiver ancestor PID+creation binding; foreground-associated or retained instance wins, ambiguity fails app-only); headless `exec --session-id <UUID>` keeps its guarded process model; explicit hook `--model` still wins |
+| Grok Code | Lifecycle hooks + process | Hook input explicit top-level model, or the bound session's `summary.json` `current_model_id` (config default and nested `tool_input` fields are never used; unbound stays app-only) |
+| Antigravity | Hooks + process | `last_selected_agent_model` placeholder in `antigravity_state.pbtxt`, resolved only through pairs learned from its own `conversations/*.db` `gen_metadata` records (seeded); unknown placeholder = app-only. Transcripts are never mined |
 | OpenCode / Cursor / Pi | Process only | None (application name only) |
 
 Selection: hook sessions outrank process detection; the Windows foreground
 window (including terminal descendants) outranks everything when several
-displayable tools compete. Within Muse, competing hook sessions resolve by positive instance binding: the session bound to the Muse PID under the focused console wins, else the retained last-focused instance, else app-only (never newest-hook). Tools without a Discord application ID are
+displayable tools compete; with no focused or remembered family, Claude wins over Codex regardless of source. Within Muse, competing hook sessions resolve by positive instance binding: the session bound to the Muse PID under the focused console wins, else the retained last-focused instance, else app-only (never newest-hook). Tools without a Discord application ID are
 excluded from selection so they can never blank a configured tool.
 
 ## Runtime layout on this machine

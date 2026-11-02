@@ -39,9 +39,9 @@ import {
   toolProviders
 } from './providers/registry';
 import { discordApplicationForTool } from './providers/discord';
-import { readMuseExecModelForProcess, readMuseSettingsModel } from './providers/muse/model';
-import { readCodexConfiguredModel } from './providers/codex/model';
-import { readGrokDefaultConfigModel, readGrokSessionSummaryModel } from './providers/grok/model';
+import { readMuseExecModelForProcess } from './providers/muse/model';
+import { readCodexConfiguredModel, readCodexDesktopModel } from './providers/codex/model';
+import { readGrokSessionSummaryModel } from './providers/grok/model';
 import { readActiveAntigravityModel } from './providers/antigravity/model';
 import type { ActiveTool, ProcessInfo } from './core/tools/types';
 import type {
@@ -90,7 +90,9 @@ export function createRpcConnectionState(): RpcConnectionState {
     activeToolKey: null,
     lastSentActivitySignature: null,
     lastCleared: true,
-    connectionAttempt: 0
+    connectionAttempt: 0,
+    nextConnectAtMs: 0,
+    reconnectDelayMs: RECONNECT_INTERVAL_MS
   };
 }
 
@@ -119,7 +121,28 @@ export function cancelReconnect(state: RpcConnectionState): void {
   state.reconnectTimer = null;
 }
 
-function scheduleReconnect(clientId: string): void {
+const MAX_RECONNECT_DELAY_MS = 60_000;
+
+// discord-rpc's destroy() is async and rejects when the IPC socket is already
+// gone ("Cannot read properties of null (reading 'write')"); never let that
+// escape as an unhandled rejection.
+export function destroyRpcClient(client: any): void {
+  if (!client) {
+    return;
+  }
+  void Promise.resolve()
+    .then(() => client.destroy())
+    .catch(() => {});
+}
+
+function noteConnectFailure(state: RpcConnectionState): number {
+  const delay = state.reconnectDelayMs || RECONNECT_INTERVAL_MS;
+  state.nextConnectAtMs = Date.now() + delay;
+  state.reconnectDelayMs = Math.min(delay * 2, MAX_RECONNECT_DELAY_MS);
+  return delay;
+}
+
+function scheduleReconnect(clientId: string, delayMs: number = RECONNECT_INTERVAL_MS): void {
   const state = rpcStateForClientId(clientId);
   if (shuttingDown || state.reconnectTimer) {
     return;
@@ -128,7 +151,7 @@ function scheduleReconnect(clientId: string): void {
   state.reconnectTimer = setTimeout(() => {
     state.reconnectTimer = null;
     void connectToDiscord(clientId);
-  }, RECONNECT_INTERVAL_MS);
+  }, delayMs);
 }
 
 export function rejectAfter(
@@ -161,11 +184,8 @@ export async function connectToDiscord(clientId: string): Promise<void> {
 
     try {
       if (state.client) {
-        try {
-          state.client.destroy();
-        } catch (_) {
-          // Best effort cleanup before creating a fresh IPC client.
-        }
+        // Best effort cleanup before creating a fresh IPC client.
+        destroyRpcClient(state.client);
       }
 
       DiscordRPC.register(clientId);
@@ -178,6 +198,8 @@ export async function connectToDiscord(clientId: string): Promise<void> {
         }
 
         state.ready = true;
+        state.nextConnectAtMs = 0;
+        state.reconnectDelayMs = RECONNECT_INTERVAL_MS;
         log(`Connected to Discord Desktop RPC for ${labelForClientId(clientId)}.`);
         if (rpcReadyKick) {
           rpcReadyKick();
@@ -217,18 +239,15 @@ export async function connectToDiscord(clientId: string): Promise<void> {
       ]);
     } catch (error) {
       if (client && client === state.client) {
-        try {
-          client.destroy();
-        } catch (_) {
-          // Best effort cleanup before retrying.
-        }
-
+        // Best effort cleanup before retrying.
+        destroyRpcClient(client);
         state.client = null;
       }
 
       state.ready = false;
-      logError(`Could not connect to Discord RPC for ${labelForClientId(clientId)}. Is Discord Desktop running?`, error);
-      scheduleReconnect(clientId);
+      const delay = noteConnectFailure(state);
+      logError(`Could not connect to Discord RPC for ${labelForClientId(clientId)}. Is Discord Desktop running? Retrying in ${Math.round(delay / 1000)}s`, error);
+      scheduleReconnect(clientId, delay);
     } finally {
       if (state.connecting) {
         state.connecting = null;
@@ -530,13 +549,23 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
   let model = modelTextForPresence(tool);
   const updatedAtMs = coerceStateTimestamp(tool.updatedAt) || 0;
 
+  // Model fallbacks below only fill a gap or follow a newer persisted pick
+  // that belongs to the same surface. Global guesses (Muse settings.json, the
+  // Grok config default) are never shown: unknown stays app-only.
   if (tool.family === 'codex') {
-    const configured = readCodexConfiguredModel();
-    if (configured?.model) {
-      if (tool.source === 'hook' && (!model || (updatedAtMs > 0 && configured.mtimeMs > updatedAtMs))) {
-        model = truncatePresenceText(configured.model);
-      } else if (tool.source === 'process' && !model && isVerifiedLiveProcess(tool.processInfo)) {
-        model = truncatePresenceText(configured.model);
+    if (tool.providerId === 'codexApp') {
+      const desktop = readCodexDesktopModel();
+      if (desktop?.model && !model && isVerifiedLiveProcess(tool.processInfo)) {
+        model = truncatePresenceText(desktop.model);
+      }
+    } else {
+      const configured = readCodexConfiguredModel();
+      if (configured?.model) {
+        if (tool.source === 'hook' && (!model || (updatedAtMs > 0 && configured.mtimeMs > updatedAtMs))) {
+          model = truncatePresenceText(configured.model);
+        } else if (tool.source === 'process' && !model && isVerifiedLiveProcess(tool.processInfo)) {
+          model = truncatePresenceText(configured.model);
+        }
       }
     }
   } else if (tool.family === 'grok') {
@@ -544,12 +573,6 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
       const summary = readGrokSessionSummaryModel(tool.sessionId, tool.cwd);
       if (summary?.model && (!model || (updatedAtMs > 0 && summary.mtimeMs > updatedAtMs))) {
         model = truncatePresenceText(summary.model);
-      }
-    }
-    if (!model && tool.source === 'process' && isVerifiedLiveProcess(tool.processInfo)) {
-      const configured = readGrokDefaultConfigModel();
-      if (configured?.model) {
-        model = truncatePresenceText(configured.model);
       }
     }
   } else if (tool.family === 'muse') {
@@ -564,37 +587,17 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
         model = truncatePresenceText(resolved);
       }
     }
-    const settings = readMuseSettingsModel();
-    if (settings?.model) {
-      if (tool.source === 'hook' && (!model || (updatedAtMs > 0 && settings.mtimeMs > updatedAtMs))) {
-        model = truncatePresenceText(settings.model);
-      } else if (tool.source === 'process' && !model && !tool.processAmbiguous && isVerifiedLiveProcess(tool.processInfo)) {
-        model = truncatePresenceText(settings.model);
-      }
-    }
-  }
-  let nextUpdatedAt = tool.updatedAt;
-  let nextSource = tool.source;
-  if (tool.family === 'antigravity') {
+  } else if (tool.family === 'antigravity') {
+    // The UI selection is written to antigravity_state.pbtxt the moment it
+    // changes, so a resolved selection is fresher than any hook payload.
     const active = readActiveAntigravityModel();
     if (active?.model) {
       model = truncatePresenceText(active.model);
-    }
-    if (
-      active
-      && Date.now() - active.mtimeMs <= 15 * 60_000
-      && tool.source === 'process'
-      && isVerifiedLiveProcess(tool.processInfo)
-    ) {
-      nextSource = 'hook';
-      nextUpdatedAt = Math.floor(active.mtimeMs);
     }
   }
 
   return {
     ...tool,
-    ...(nextSource !== tool.source ? { source: nextSource } : {}),
-    ...(nextUpdatedAt !== tool.updatedAt ? { updatedAt: nextUpdatedAt } : {}),
     details: model ? truncatePresenceText(`Model: ${model}`) : '',
     state: ''
   };
@@ -674,7 +677,7 @@ async function updateActivityForClient(clientId: string, tool: ActiveTool): Prom
     log(`Detected ${tool.details || tool.key} for ${labelForClientId(clientId)}.`);
   }
 
-  if (!state.ready || !state.client) {
+  if ((!state.ready || !state.client) && Date.now() >= state.nextConnectAtMs) {
     await connectToDiscord(clientId);
   }
 
@@ -733,11 +736,11 @@ export function selectNewestTool(tools: ActiveTool[], preferredFamily: string | 
     }
   }
 
+  // With neither tool focused nor remembered, Claude wins over Codex even when
+  // Claude has aged out to process-only detection: a Codex hook (often a
+  // subagent Claude started) must not take over the display on its own.
   if (toolFamilyForTool(ordered[0]) === 'codex') {
-    const topRank = sourceRank(ordered[0]);
-    const claudeTool = ordered.find(
-      (tool) => toolFamilyForTool(tool) === 'claude' && sourceRank(tool) >= topRank
-    );
+    const claudeTool = ordered.find((tool) => toolFamilyForTool(tool) === 'claude');
     if (claudeTool) {
       return claudeTool;
     }

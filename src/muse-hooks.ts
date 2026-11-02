@@ -38,6 +38,20 @@ export const MUSE_SETTINGS_SCHEMA_VERSION = 1;
 const MUSE_HOOK_TIMEOUT_SECONDS = 5;
 const MUSE_BINDER_DEPTH = 8;
 const MUSE_BINDER_TIMEOUT_MS = 3000;
+// Minimum spacing between ancestor walks for a session whose last walk found
+// no Muse process, on events fired per LLM call (PreLLMCall/PostLLMCall).
+const MUSE_BIND_RETRY_MS = 5 * 60 * 1000;
+
+// Persisted alongside the session (state upsert spreads extra fields through):
+// Unix ms of the last ancestor walk that found no owning Muse process.
+type MuseHookSessionState = HookSessionState & { museBindAttemptedAt?: number };
+
+// Human-paced events always retry the walk; per-LLM-call events honour the
+// negative result until MUSE_BIND_RETRY_MS has passed.
+function isMuseBindRetryEvent(event: string): boolean {
+  const normalized = event.trim().toLowerCase().replace(/_/g, '');
+  return normalized === 'sessionstart' || normalized === 'userpromptsubmit';
+}
 
 function defaultMuseConfigDir(): string {
   const xdg = (process.env.XDG_CONFIG_HOME || '').trim();
@@ -532,30 +546,58 @@ export function museHookSessionFromArgs(args: Record<string, string | boolean>):
     || normalizeMuseHookModel(topLevelString(input, ['model']))
     || undefined;
   const status = statusFromMuseHookEvent(event);
-  const existing = status !== 'stopped' ? readStateFile().sessions[sessionId] : undefined;
-  const binding = status === 'stopped'
-    ? null
-    : (existing
-      && typeof existing.musePid === 'number'
-      && existing.musePid > 0
-      && typeof existing.museCreatedAtMs === 'number'
-      && existing.museCreatedAtMs > 0
-      && isProcessAlive(existing.musePid))
-      ? { musePid: existing.musePid, museCreatedAtMs: existing.museCreatedAtMs }
-      : findOwningMuseProcess();
+  const now = Date.now();
+  const existing = status !== 'stopped'
+    ? readStateFile().sessions[sessionId] as MuseHookSessionState | undefined
+    : undefined;
+  const retained = (existing
+    && typeof existing.musePid === 'number'
+    && existing.musePid > 0
+    && typeof existing.museCreatedAtMs === 'number'
+    && existing.museCreatedAtMs > 0
+    && isProcessAlive(existing.musePid))
+    ? { musePid: existing.musePid, museCreatedAtMs: existing.museCreatedAtMs }
+    : null;
+  // A failed CIM walk is remembered per session so the synchronous
+  // PreLLMCall/PostLLMCall hooks do not re-spawn powershell.exe (up to
+  // MUSE_BINDER_TIMEOUT_MS each) on every LLM call. Retry on human-paced
+  // events, or once the negative result is older than the retry window.
+  const lastAttempt = typeof existing?.museBindAttemptedAt === 'number' ? existing.museBindAttemptedAt : 0;
+  const skipWalk = !retained
+    && !isMuseBindRetryEvent(event)
+    && lastAttempt > 0
+    && lastAttempt <= now
+    && now - lastAttempt < MUSE_BIND_RETRY_MS;
+  let bindAttemptedAt: number | null = null;
+  let binding: MuseBindingProof | null = null;
+  if (status !== 'stopped') {
+    if (retained) {
+      binding = retained;
+    } else if (!skipWalk) {
+      binding = findOwningMuseProcess();
+      if (!binding) {
+        bindAttemptedAt = now;
+      }
+    }
+  }
 
-  const session: HookSessionState = {
+  const session: MuseHookSessionState = {
     tool: 'muse',
     surface: getArgString(args, 'surface') || 'cli',
     status: statusFromMuseHookEvent(event),
     session_id: sessionId,
     cwd,
-    updated_at: Date.now(),
+    updated_at: now,
     model
   };
   if (binding) {
     session.musePid = binding.musePid;
     session.museCreatedAtMs = binding.museCreatedAtMs;
+    // Explicit undefined clears a stale negative result through the upsert spread.
+    session.museBindAttemptedAt = undefined;
+  }
+  if (bindAttemptedAt !== null) {
+    session.museBindAttemptedAt = bindAttemptedAt;
   }
   return session;
 }

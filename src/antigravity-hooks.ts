@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { shellQuoteArg } from './env';
 import { envPathValue, resolveHomePath } from './commands/config/settings';
 import { getArgString } from './commands/args';
-import { readHookInput } from './state-store';
+import { readHookInput, sleepSync } from './state-store';
 import {
   normalizeAntigravityModel,
   readActiveAntigravityModel
@@ -48,17 +48,18 @@ function asRecord(value: unknown): JsonRecord | null {
   return value as JsonRecord;
 }
 
+// Windows hook commands are plain double-quoted cmd-compatible args with the
+// absolute node binary (never bare `node`, which depends on the GUI app's
+// PATH). Windows paths cannot contain `"`, so no escaping is needed; a
+// backslash-escaped `\"` is not cmd quoting and would break the command.
 function cmdQuoteArg(value: string): string {
-  if (!value.includes(' ')) {
-    return value.replace(/\\/g, '/');
-  }
-  return `"${value.replace(/"/g, '\\"')}"`;
+  return `"${value}"`;
 }
 
 export function antigravityHookCommand(scriptPath: string, event: string): string {
   if (process.platform === 'win32') {
     return [
-      'node',
+      cmdQuoteArg(process.execPath),
       cmdQuoteArg(scriptPath),
       'antigravity-hook',
       '--event',
@@ -83,37 +84,98 @@ export function isManagedAntigravityHookHandler(handler: unknown): boolean {
   return command.includes(ANTIGRAVITY_MANAGED_HOOK_MARKER);
 }
 
-export function readAntigravityHooksFile(filePath = ANTIGRAVITY_HOOKS_FILE): JsonRecord {
+/**
+ * Thrown when an existing hooks.json cannot be parsed as a JSON object
+ * (JSONC comments, trailing commas, corruption). Writers must refuse to touch
+ * the file: rewriting it from `{}` would delete the user's other hooks.
+ */
+export class AntigravityHooksParseError extends Error {
+  constructor(filePath: string, cause: string) {
+    super(
+      `Refusing to modify ${filePath}: it is not a plain JSON object (${cause}). `
+      + 'Fix or remove the file, then run the command again.'
+    );
+    this.name = 'AntigravityHooksParseError';
+  }
+}
+
+/**
+ * Strict read for writers: a missing file is `{}`, an unparsable or non-object
+ * file throws AntigravityHooksParseError so nothing gets overwritten.
+ */
+export function readAntigravityHooksFileStrict(filePath = ANTIGRAVITY_HOOKS_FILE): JsonRecord {
   if (!fs.existsSync(filePath)) {
     return {};
   }
+  const text = fs.readFileSync(filePath, 'utf8');
+  if (!text.trim()) {
+    return {};
+  }
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8')) as unknown;
-    return asRecord(parsed) || {};
+    parsed = JSON.parse(text) as unknown;
+  } catch (error) {
+    throw new AntigravityHooksParseError(filePath, error instanceof Error ? error.name : 'parse error');
+  }
+  const record = asRecord(parsed);
+  if (!record) {
+    throw new AntigravityHooksParseError(filePath, 'top level is not an object');
+  }
+  return record;
+}
+
+/** Lenient read for status reporting: unparsable files read as `{}`. */
+export function readAntigravityHooksFile(filePath = ANTIGRAVITY_HOOKS_FILE): JsonRecord {
+  try {
+    return readAntigravityHooksFileStrict(filePath);
   } catch (_) {
     return {};
   }
 }
 
-export function writeAntigravityHooksFile(filePath: string, config: JsonRecord): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  if (fs.existsSync(filePath)) {
+const RENAME_ATTEMPTS = 10;
+const RENAME_RETRYABLE = new Set(['EPERM', 'EACCES']);
+
+// Windows transiently refuses to replace a file that a scanner, indexer, or the
+// editor itself still has open (EPERM/EACCES). The rename stays atomic; only
+// the attempt is retried with backoff, and the last error is rethrown.
+function renameWithRetrySync(source: string, target: string): void {
+  for (let attempt = 1; attempt <= RENAME_ATTEMPTS; attempt += 1) {
     try {
-      fs.copyFileSync(filePath, `${filePath}.bak`);
-    } catch (_) {
-      // Ignore backup failures.
+      fs.renameSync(source, target);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (!RENAME_RETRYABLE.has(code || '') || attempt === RENAME_ATTEMPTS) {
+        throw error;
+      }
+      sleepSync(25 * attempt);
     }
   }
+}
+
+/**
+ * Atomic write (temp file + rename with EPERM/EACCES retry). Before the first
+ * change, the existing file is copied to `<file>.bak` exactly once: an existing
+ * backup is never overwritten, so re-runs cannot clobber the original.
+ */
+export function writeAntigravityHooksFile(filePath: string, config: JsonRecord): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const backupFile = `${filePath}.bak`;
+  if (fs.existsSync(filePath) && !fs.existsSync(backupFile)) {
+    fs.copyFileSync(filePath, backupFile, fs.constants.COPYFILE_EXCL);
+  }
   const tempFile = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tempFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
   try {
-    fs.writeFileSync(tempFile, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-    fs.renameSync(tempFile, filePath);
-  } finally {
+    renameWithRetrySync(tempFile, filePath);
+  } catch (error) {
     try {
       fs.unlinkSync(tempFile);
     } catch (_) {
-      // Already renamed.
+      // Best effort: never mask the original rename failure.
     }
+    throw error;
   }
 }
 
@@ -171,7 +233,7 @@ export function getManagedAntigravityHookStatus(
 }
 
 export function removeManagedAntigravityHooks(
-  config: unknown = readAntigravityHooksFile()
+  config: unknown = readAntigravityHooksFileStrict()
 ): { config: JsonRecord; removed: number } {
   const root = asRecord(config) ?? {};
   const nextRoot: JsonRecord = {};
@@ -215,7 +277,7 @@ export function removeManagedAntigravityHooks(
 
 export function installManagedAntigravityHooks(
   scriptPath: string,
-  config: unknown = readAntigravityHooksFile(),
+  config: unknown = readAntigravityHooksFileStrict(),
   events: readonly string[] = ANTIGRAVITY_HOOK_EVENTS
 ): { config: JsonRecord; installed: number; removed: number; hooksFile: string } {
   const cleaned = removeManagedAntigravityHooks(config);

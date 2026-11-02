@@ -159,6 +159,9 @@ export function queryWindowsTaskTarget(taskName: string): string | null {
   }
 }
 
+/** Daemon log size that triggers rotation to `<name>.1` at the next launch. */
+export const LOG_ROTATE_MAX_BYTES = 1024 * 1024;
+
 export function writeWindowsLauncher(
   scriptPath: string,
   options: { installDirectory: string; logDirectory: string }
@@ -167,10 +170,17 @@ export function writeWindowsLauncher(
   fs.mkdirSync(options.installDirectory, { recursive: true });
   fs.mkdirSync(options.logDirectory, { recursive: true });
 
+  const outLog = path.join(options.logDirectory, 'discord-coding-status.log');
+  const errLog = path.join(options.logDirectory, 'discord-coding-status.error.log');
   const content = [
     '@echo off',
+    // Log rotation: the redirect below holds both files open for the
+    // daemon's lifetime (Windows cannot rename them then), so rotate here,
+    // before they are opened. Over LOG_ROTATE_MAX_BYTES -> <name>.1 (one old
+    // file kept, replaced on the next rotation).
+    `for %%F in ("${outLog}" "${errLog}") do if exist "%%~F" if %%~zF GTR ${LOG_ROTATE_MAX_BYTES} move /y "%%~F" "%%~F.1" >nul 2>&1`,
     `cd /d "${path.dirname(scriptPath)}"`,
-    `"${process.execPath}" "${scriptPath}" daemon >> "${path.join(options.logDirectory, 'discord-coding-status.log')}" 2>> "${path.join(options.logDirectory, 'discord-coding-status.error.log')}"`
+    `"${process.execPath}" "${scriptPath}" daemon >> "${outLog}" 2>> "${errLog}"`
   ].join('\r\n') + '\r\n';
 
   fs.writeFileSync(launcherPath, content);
@@ -269,6 +279,13 @@ export function restartManagedDaemon(
     macosLaunchAgentId: string;
     windowsTaskName: string;
     skipRestart?: boolean;
+    /**
+     * Windows: stops the running daemon before `/Run`. Required because the
+     * task action (hidden VBS, `shell.Run ..., 0, False`) returns at once, so
+     * the task is already "Ready" and `/End` stops nothing; the new daemon
+     * would then see the live lock and exit.
+     */
+    stopDaemon?: () => void;
   }
 ): DaemonRefreshResult {
   if (options.skipRestart) {
@@ -311,6 +328,7 @@ export function restartManagedDaemon(
       try {
         execFileSync('schtasks', ['/End', '/TN', options.windowsTaskName], { stdio: 'ignore' });
       } catch (_) {}
+      options.stopDaemon?.();
       execFileSync('schtasks', ['/Run', '/TN', options.windowsTaskName], { stdio: 'ignore' });
       return { status: 'restarted' };
     } catch (error) {

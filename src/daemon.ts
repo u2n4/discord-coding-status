@@ -1,5 +1,6 @@
 'use strict';
 
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -16,11 +17,13 @@ import {
   resolveMuseDisplaySession
 } from './core/selection/muse-instance';
 import {
-  getProcessList
+  getProcessList,
+  isProcessAlive
 } from './adapters/system/processes';
 import {
   getCachedProcessByPid,
   getCachedProcessList,
+  isHostOrAiProcess,
   refreshProcessForPid,
   setCachedProcessList
 } from './adapters/system/process-cache';
@@ -37,16 +40,23 @@ import {
   watchSelectedModelFile
 } from './adapters/system/selected-model-watch';
 import {
+  HELPER_RESTART_CAP_MS,
+  HelperRestartBackoff,
   applyClaudeDesktopDisplayOverride,
   clearVerifiedClaudeDesktopModel,
   getClaudeDesktopModelWatcherStats,
   getVerifiedClaudeDesktopModel,
   isClaudeDesktopModelWatcherHealthy,
+  isVerifiedClaudeDesktopModelFresh,
   setVerifiedClaudeDesktopModel,
   startClaudeDesktopModelWatcher,
-  stopClaudeDesktopModelWatcher
+  stopClaudeDesktopModelWatcher,
+  touchVerifiedClaudeDesktopModel
 } from './adapters/system/claude-desktop-model-watch';
-import type { ClaudeDesktopDisplayOverride } from './adapters/system/claude-desktop-model-watch';
+import type {
+  ClaudeDesktopDisplayOverride,
+  VerifiedClaudeDesktopModel
+} from './adapters/system/claude-desktop-model-watch';
 import {
   toolProviders
 } from './providers/registry';
@@ -55,7 +65,8 @@ import {
   readMuseSettingsModel
 } from './providers/muse/model';
 import {
-  readCodexConfiguredModel
+  readCodexConfiguredModel,
+  readCodexDesktopModel
 } from './providers/codex/model';
 import {
   readGrokDefaultConfigModel,
@@ -86,6 +97,7 @@ import {
 import {
   cancelReconnect,
   clientIdForTool,
+  destroyRpcClient,
   detectStateTools,
   enrichToolsForPresence,
   labelForClientId,
@@ -102,16 +114,18 @@ import {
   toolFamilyForTool
 } from './quota';
 import {
-  familyForForegroundProcess,
+  familiesForForegroundProcess,
   getForegroundPid,
-  musePidForForegroundProcess
+  musePidForForegroundProcess,
+  pickAmbiguousForegroundFamily
 } from './adapters/system/foreground';
 import {
   debugLog,
   log
 } from './state-store';
 
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollTimer: ReturnType<typeof setTimeout> | null = null;
+let pollingStarted = false;
 let stateWatcher: import('node:fs').FSWatcher | null = null;
 let stateWatchTimer: ReturnType<typeof setTimeout> | null = null;
 let shuttingDown = false;
@@ -123,15 +137,31 @@ let slowInFlight = false;
 let fastInFlight = false;
 let fastQueued = false;
 let fastGeneration = 0;
+// Consecutive passes aborted because a newer event was queued. Constant hook
+// writes would otherwise starve publishing forever; after this many aborts
+// the pass publishes anyway (its data is at most one event old).
+let consecutiveFastAborts = 0;
+const MAX_CONSECUTIVE_FAST_ABORTS = 3;
+
+// Adaptive slow census: while no AI tool process or hook session is alive the
+// census runs at the idle interval; the first hook/process sighting switches
+// back to POLL_INTERVAL_MS immediately.
+export const IDLE_CENSUS_INTERVAL_MS = Math.max(POLL_INTERVAL_MS, 60_000);
+let aiActivityAlive = true;
+let censusMode: 'active' | 'idle' | null = null;
 
 let foregroundWatcherStarted = false;
 let watcherRestartTimer: ReturnType<typeof setTimeout> | null = null;
-let lastWatcherRestartAt = 0;
+const foregroundWatcherBackoff = new HelperRestartBackoff();
 let latestForegroundPid: number | null | undefined = undefined;
 let lastForegroundPid: number | null | undefined = undefined;
 let claudeDesktopWatcherStarted = false;
 let claudeDesktopExpectedPid: number | null = null;
 let claudeDesktopWatcherRestartTimer: ReturnType<typeof setTimeout> | null = null;
+// UIA helper restart policy: backoff per Desktop PID, app-only after 5
+// consecutive failures until the Desktop PID changes.
+const CLAUDE_DESKTOP_HELPER_GIVE_UP_AFTER = 5;
+const claudeDesktopBackoff = new HelperRestartBackoff(CLAUDE_DESKTOP_HELPER_GIVE_UP_AFTER);
 
 setRpcReadyKick(() => {
   requestFastUpdate('rpc-ready');
@@ -171,53 +201,252 @@ function validateEnvironment(): void {
   }
 }
 
-const DAEMON_LOCK_FILE = `${STATE_FILE}.daemon.lock`;
+export const DAEMON_LOCK_FILE = `${STATE_FILE}.daemon.lock`;
 
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (_) {
-    return false;
-  }
+export interface DaemonLockInfo {
+  pid: number;
+  /** Lock acquisition time (ms); legacy PID-only locks use the file mtime. */
+  startedAt: number | null;
+  raw: string;
 }
 
-function readLockPid(): number | null {
+export interface DaemonProcessIdentity {
+  name: string;
+  commandLine: string;
+  createdAtMs: number | null;
+}
+
+/** Clock-skew allowance between process creation and lock acquisition. */
+const LOCK_CREATION_TOLERANCE_MS = 5_000;
+
+export function readDaemonLock(lockFile: string = DAEMON_LOCK_FILE): DaemonLockInfo | null {
+  let raw: string;
   try {
-    const pid = Number(fs.readFileSync(DAEMON_LOCK_FILE, 'utf8').trim());
-    return Number.isFinite(pid) && pid > 0 ? pid : null;
+    raw = fs.readFileSync(lockFile, 'utf8');
   } catch (_) {
     return null;
   }
+
+  const text = raw.trim();
+  let pid = NaN;
+  let startedAt: number | null = null;
+  if (text.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text) as { pid?: unknown; startedAt?: unknown };
+      pid = Number(parsed.pid);
+      const started = Number(parsed.startedAt);
+      startedAt = Number.isFinite(started) && started > 0 ? started : null;
+    } catch (_) {
+      pid = NaN;
+    }
+  } else {
+    // Legacy lock (PID only) written by older daemons.
+    pid = Number(text);
+    try {
+      startedAt = fs.statSync(lockFile).mtimeMs;
+    } catch (_) {
+      startedAt = null;
+    }
+  }
+
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { pid: 0, startedAt: null, raw };
+  }
+  return { pid, startedAt, raw };
 }
 
-// Prevents duplicate daemon instances (a second manual start, or a task
-// restart racing a slow shutdown). Stale locks from crashed daemons are
-// taken over once their PID is gone.
-function acquireDaemonLock(): boolean {
-  const existingPid = readLockPid();
-  if (existingPid && existingPid !== process.pid && isPidAlive(existingPid)) {
+/**
+ * One CIM lookup of a PID's identity (Windows). Returns undefined when the
+ * query itself failed (unknown), null when no such process exists.
+ */
+export function queryDaemonProcessIdentity(pid: number): DaemonProcessIdentity | null | undefined {
+  if (process.platform !== 'win32') {
+    return undefined;
+  }
+  const safePid = Math.floor(pid);
+  if (!Number.isFinite(safePid) || safePid <= 0) {
+    return null;
+  }
+  const command = [
+    `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${safePid}";`,
+    'if ($p) { [pscustomobject]@{ Name = [string]$p.Name; CommandLine = [string]$p.CommandLine;',
+    "Created = $(if ($p.CreationDate) { $p.CreationDate.ToUniversalTime().ToString('o') } else { '' }) } | ConvertTo-Json -Compress }"
+  ].join(' ');
+  let stdout: string;
+  try {
+    stdout = String(execFileSync('powershell.exe', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      command
+    ], { encoding: 'utf8', timeout: 5_000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }) || '');
+  } catch (_) {
+    return undefined;
+  }
+  const text = stdout.trim();
+  if (!text) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(text) as { Name?: unknown; CommandLine?: unknown; Created?: unknown };
+    const created = typeof parsed.Created === 'string' ? Date.parse(parsed.Created) : NaN;
+    return {
+      name: typeof parsed.Name === 'string' ? parsed.Name : '',
+      commandLine: typeof parsed.CommandLine === 'string' ? parsed.CommandLine : '',
+      createdAtMs: Number.isFinite(created) ? created : null
+    };
+  } catch (_) {
+    return undefined;
+  }
+}
+
+/** True when `identity` looks like this app's daemon (node/bun running `cli.js daemon`). */
+export function isDaemonProcessIdentity(identity: DaemonProcessIdentity, lockStartedAt: number | null): boolean {
+  if (!/^(?:node|bun)(?:\.exe)?$/i.test(identity.name.trim())) {
     return false;
   }
+  if (!/cli\.js/i.test(identity.commandLine) || !/(?:^|\s|")daemon(?:\s|"|$)/i.test(identity.commandLine)) {
+    return false;
+  }
+  // A process created after the lock was written reused the PID.
+  if (lockStartedAt !== null && identity.createdAtMs !== null
+    && identity.createdAtMs > lockStartedAt + LOCK_CREATION_TOLERANCE_MS) {
+    return false;
+  }
+  return true;
+}
 
+/**
+ * Whether the lock holder is a live instance of our daemon. A dead PID, or a
+ * live PID that now belongs to an unrelated process (PID reuse), is stale.
+ * When the identity lookup itself fails the holder is assumed live (never
+ * start a duplicate on missing evidence).
+ */
+export function isDaemonLockHolderLive(
+  lock: DaemonLockInfo,
+  lookup: (pid: number) => DaemonProcessIdentity | null | undefined = queryDaemonProcessIdentity
+): boolean {
+  if (!lock.pid || !isProcessAlive(lock.pid)) {
+    return false;
+  }
+  if (lock.pid === process.pid) {
+    return true;
+  }
+  const identity = lookup(lock.pid);
+  if (identity === undefined) {
+    return true;
+  }
+  if (identity === null) {
+    return false;
+  }
+  return isDaemonProcessIdentity(identity, lock.startedAt);
+}
+
+function unlinkIfLockContent(lockFile: string, expected: string): void {
   try {
-    fs.mkdirSync(path.dirname(DAEMON_LOCK_FILE), { recursive: true });
-    fs.writeFileSync(DAEMON_LOCK_FILE, String(process.pid));
-    return true;
-  } catch (error) {
-    logError('Could not write the daemon lock file; starting without duplicate protection', error);
-    return true;
+    if (fs.readFileSync(lockFile, 'utf8') === expected) {
+      fs.unlinkSync(lockFile);
+    }
+  } catch (_) {
+    // Already gone or replaced: the next exclusive create decides.
   }
 }
 
-function releaseDaemonLock(): void {
+let ownDaemonLockContent: string | null = null;
+
+// Prevents duplicate daemon instances (a second manual start, or a task
+// restart racing a slow shutdown). The lock is created exclusively ('wx') so
+// two starting daemons can never both win; a stale lock (dead PID, PID reused
+// by another program, or a force-killed daemon) is removed and retried.
+export function acquireDaemonLock(
+  lockFile: string = DAEMON_LOCK_FILE,
+  lookup?: (pid: number) => DaemonProcessIdentity | null | undefined
+): boolean {
   try {
-    if (readLockPid() === process.pid) {
-      fs.unlinkSync(DAEMON_LOCK_FILE);
-    }
+    fs.mkdirSync(path.dirname(lockFile), { recursive: true });
   } catch (_) {
-    // Best effort cleanup.
+    // openSync below reports the real error.
   }
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const content = JSON.stringify({ pid: process.pid, startedAt: Date.now() });
+    try {
+      const fd = fs.openSync(lockFile, 'wx');
+      try {
+        fs.writeFileSync(fd, content);
+      } finally {
+        fs.closeSync(fd);
+      }
+      ownDaemonLockContent = content;
+      return true;
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code !== 'EEXIST') {
+        logError('Could not write the daemon lock file; starting without duplicate protection', error);
+        return true;
+      }
+    }
+
+    const existing = readDaemonLock(lockFile);
+    if (!existing) {
+      continue;
+    }
+    if (existing.raw.trim() === '') {
+      // Another starter created the file and has not written it yet.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      const again = readDaemonLock(lockFile);
+      if (!again || again.raw !== existing.raw) {
+        continue;
+      }
+    }
+    if (existing.pid && isDaemonLockHolderLive(existing, lookup)) {
+      return false;
+    }
+    log(`Removing stale daemon lock (PID ${existing.pid || 'unknown'}).`);
+    unlinkIfLockContent(lockFile, existing.raw);
+  }
+
+  return false;
+}
+
+export function releaseDaemonLock(lockFile: string = DAEMON_LOCK_FILE): void {
+  if (ownDaemonLockContent !== null) {
+    unlinkIfLockContent(lockFile, ownDaemonLockContent);
+    ownDaemonLockContent = null;
+  }
+}
+
+/**
+ * Stops ONLY the daemon recorded in the lock file (verified identity), then
+ * waits for it to exit so a following task /Run is not refused by the lock.
+ * The hidden VBS launcher returns immediately, so `schtasks /End` alone never
+ * stops the running daemon.
+ */
+export function stopDaemonFromLock(
+  lockFile: string = DAEMON_LOCK_FILE,
+  options: { timeoutMs?: number; lookup?: (pid: number) => DaemonProcessIdentity | null | undefined } = {}
+): 'none' | 'stale' | 'stopped' | 'still-running' {
+  const lock = readDaemonLock(lockFile);
+  if (!lock || !lock.pid || lock.pid === process.pid) {
+    return 'none';
+  }
+  if (!isDaemonLockHolderLive(lock, options.lookup)) {
+    return 'stale';
+  }
+  try {
+    process.kill(lock.pid);
+  } catch (_) {
+    // Exited between the check and the kill.
+  }
+  const deadline = Date.now() + (options.timeoutMs ?? 5_000);
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(lock.pid)) {
+      return 'stopped';
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+  return isProcessAlive(lock.pid) ? 'still-running' : 'stopped';
 }
 
 function requestFastUpdate(reason: string): void {
@@ -245,11 +474,59 @@ async function runSlowCensusOnce(): Promise<void> {
     const processList = PROCESS_DETECTION_ENABLED ? await getProcessList() : [];
     setCachedProcessList(processList);
     debugLog(`Slow census cached ${processList.length} process(es).`);
+    aiActivityAlive = hasLiveAiActivity(processList);
     requestFastUpdate('slow-census');
   } catch (error) {
     logError('Slow census failed; continuing with the cached snapshot', error);
   } finally {
     slowInFlight = false;
+    scheduleNextCensus();
+  }
+}
+
+function hasLiveAiActivity(processList: Parameters<typeof detectActiveTools>[0]): boolean {
+  try {
+    if (detectStateTools().length > 0) {
+      return true;
+    }
+    return PROCESS_DETECTION_ENABLED && detectActiveTools(processList, toolProviders, {
+      preferredSurfaceByFamily: PREFER_CODEX_CLI ? { codex: 'cli' } : {},
+      idleGraceMs: PROCESS_IDLE_GRACE_MS,
+      activeCpuMs: PROCESS_ACTIVE_CPU_MS
+    }).length > 0;
+  } catch (_) {
+    return true;
+  }
+}
+
+function scheduleNextCensus(delayOverride?: number): void {
+  if (shuttingDown || !pollingStarted) {
+    return;
+  }
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+  const mode: 'active' | 'idle' = aiActivityAlive ? 'active' : 'idle';
+  const delay = delayOverride ?? (mode === 'active' ? POLL_INTERVAL_MS : IDLE_CENSUS_INTERVAL_MS);
+  if (mode !== censusMode) {
+    censusMode = mode;
+    debugLog(`Slow census ${mode}; next in ${delay}ms.`);
+  }
+  pollTimer = setTimeout(() => {
+    pollTimer = null;
+    void runSlowCensusOnce();
+  }, delay);
+}
+
+// A hook or process sighting while idle switches the census back to the
+// active interval at once (one immediate census refreshes process data).
+function noteAiActivity(alive: boolean): void {
+  if (alive && !aiActivityAlive) {
+    aiActivityAlive = true;
+    if (!slowInFlight) {
+      scheduleNextCensus(0);
+    }
   }
 }
 
@@ -283,7 +560,11 @@ function updateSelectedModelWatch(
           file = readMuseSettingsModel()?.filePath || null;
         }
       } else if (selected.family === 'codex') {
-        file = readCodexConfiguredModel()?.filePath || null;
+        // Codex Desktop reads its composer pick from the global-state file;
+        // every CLI/hook Codex tool reads config.toml (the CLI default).
+        file = selected.providerId === 'codexApp'
+          ? readCodexDesktopModel()?.filePath || null
+          : readCodexConfiguredModel()?.filePath || null;
       } else if (selected.family === 'grok') {
         if (selected.sessionId) {
           file = readGrokSessionSummaryModel(selected.sessionId, selected.cwd)?.filePath || null;
@@ -303,7 +584,7 @@ function updateSelectedModelWatch(
     if (file !== getWatchedModelFile()) {
       if (file) {
         watchSelectedModelFile(file, () => requestFastUpdate('model-file'));
-        debugLog(`Watching selected Muse model file ${file}.`);
+        debugLog(`Watching selected ${selected?.family || 'unknown'} model file ${file}.`);
       } else {
         unwatchSelectedModelFile();
       }
@@ -335,27 +616,31 @@ function claudeDesktopProviderMatchesPid(pid: number): boolean {
   }
 }
 
-function getVerifiedDesktopModelForDisplay(): string | null {
+function getVerifiedDesktopModelForDisplay(): VerifiedClaudeDesktopModel | null {
   // Retention policy: a verified UI model stays displayable while its PID is
-  // still a live Claude Desktop process and the observation is fresh. Fail
-  // closed otherwise (caller clears stale entries).
+  // still a live Claude Desktop process and the last Desktop observation is
+  // under CLAUDE_DESKTOP_MODEL_RETENTION_MS old. Fail closed otherwise
+  // (caller clears stale entries).
   const cached = getVerifiedClaudeDesktopModel();
   if (!cached) {
     return null;
   }
-  if (!Number.isFinite(cached.updatedAt)) {
+  if (!isVerifiedClaudeDesktopModelFresh(cached)) {
     return null;
   }
   if (!claudeDesktopProviderMatchesPid(cached.pid)) {
     return null;
   }
-  return cached.model;
+  return cached;
 }
 
 function stopClaudeDesktopModelTracker(): void {
   if (claudeDesktopWatcherRestartTimer) {
     clearTimeout(claudeDesktopWatcherRestartTimer);
     claudeDesktopWatcherRestartTimer = null;
+  }
+  if (claudeDesktopWatcherStarted) {
+    claudeDesktopBackoff.noteStop();
   }
   try {
     stopClaudeDesktopModelWatcher();
@@ -395,8 +680,31 @@ function ensureClaudeDesktopModelTracker(expectedPid: number | null): void {
   if (claudeDesktopWatcherStarted && claudeDesktopExpectedPid === expectedPid && isClaudeDesktopModelWatcherHealthy()) {
     return;
   }
+  if (claudeDesktopWatcherStarted && claudeDesktopExpectedPid === expectedPid) {
+    // Started but unhealthy without an exit callback yet: count it as a
+    // failed run and wait for the backoff instead of respawning at once.
+    try {
+      stopClaudeDesktopModelWatcher();
+    } catch (_) {
+      // Best effort.
+    }
+    claudeDesktopWatcherStarted = false;
+    scheduleClaudeDesktopRestart(expectedPid);
+    return;
+  }
+  if (claudeDesktopBackoff.isGivenUp(expectedPid)) {
+    // Helper kept crashing for this Desktop PID: app-only until it changes.
+    claudeDesktopExpectedPid = expectedPid;
+    return;
+  }
+  if (!claudeDesktopBackoff.canStart(expectedPid)) {
+    // Inside the backoff window; the pending restart timer retries.
+    claudeDesktopExpectedPid = expectedPid;
+    return;
+  }
   claudeDesktopExpectedPid = expectedPid;
   claudeDesktopWatcherStarted = true;
+  claudeDesktopBackoff.noteStart(expectedPid);
   const handle = startClaudeDesktopModelWatcher(
     (event) => {
       if (event.kind === 'model') {
@@ -428,18 +736,7 @@ function ensureClaudeDesktopModelTracker(expectedPid: number | null): void {
       debugLog('Claude Desktop model watcher exited.');
       claudeDesktopWatcherStarted = false;
       if (!shuttingDown && claudeDesktopExpectedPid !== null) {
-        if (claudeDesktopWatcherRestartTimer) {
-          clearTimeout(claudeDesktopWatcherRestartTimer);
-        }
-        claudeDesktopWatcherRestartTimer = setTimeout(() => {
-          claudeDesktopWatcherRestartTimer = null;
-          if (!shuttingDown && claudeDesktopExpectedPid !== null) {
-            claudeDesktopWatcherStarted = false;
-            ensureClaudeDesktopModelTracker(claudeDesktopExpectedPid);
-            requestFastUpdate('desktop-watcher-restart');
-          }
-        }, 1000);
-        (claudeDesktopWatcherRestartTimer as unknown as { unref?: () => void }).unref?.();
+        scheduleClaudeDesktopRestart(claudeDesktopExpectedPid);
       }
     },
     { expectedPid }
@@ -450,7 +747,30 @@ function ensureClaudeDesktopModelTracker(expectedPid: number | null): void {
   } else {
     debugLog('Claude Desktop model watcher unavailable; Desktop stays app-only.');
     claudeDesktopWatcherStarted = false;
+    scheduleClaudeDesktopRestart(expectedPid);
   }
+}
+
+function scheduleClaudeDesktopRestart(expectedPid: number): void {
+  const delay = claudeDesktopBackoff.noteExit();
+  if (claudeDesktopWatcherRestartTimer) {
+    clearTimeout(claudeDesktopWatcherRestartTimer);
+    claudeDesktopWatcherRestartTimer = null;
+  }
+  if (delay === null) {
+    log(`Claude Desktop model helper failed ${CLAUDE_DESKTOP_HELPER_GIVE_UP_AFTER} times for PID ${expectedPid}; Desktop stays app-only until its PID changes.`);
+    return;
+  }
+  debugLog(`Claude Desktop model helper restart in ${delay}ms (failure ${claudeDesktopBackoff.failures}).`);
+  claudeDesktopWatcherRestartTimer = setTimeout(() => {
+    claudeDesktopWatcherRestartTimer = null;
+    if (!shuttingDown && claudeDesktopExpectedPid === expectedPid) {
+      claudeDesktopWatcherStarted = false;
+      ensureClaudeDesktopModelTracker(expectedPid);
+      requestFastUpdate('desktop-watcher-restart');
+    }
+  }, delay);
+  (claudeDesktopWatcherRestartTimer as unknown as { unref?: () => void }).unref?.();
 }
 
 async function runFastPass(generation: number): Promise<void> {
@@ -464,13 +784,18 @@ async function runFastPass(generation: number): Promise<void> {
     })
     : [];
   debugLog(`Fast pass ${generation} found ${stateTools.length} state tool(s) and ${processTools.length} process tool(s).`);
+  noteAiActivity(stateTools.length > 0 || processTools.length > 0);
   const merged = mergeActiveTools(stateTools, processTools);
   const displayable = merged.filter((tool) => clientIdForTool(tool));
   const aliveFamilies = new Set(displayable.map((tool) => toolFamilyForTool(tool)));
 
-  // Foreground attribution only runs while several displayable tools compete,
-  // so the common single-tool case costs no extra work. Unknown/null/browser/
-  // game foreground keeps the remembered family via last-focused retention.
+  // Foreground attribution runs whenever at least one displayable tool is
+  // alive (Desktop binding, Muse instance and last-focused retention need it
+  // even for a single tool); with no AI tool it costs nothing. Unknown/null/
+  // browser/game foreground keeps the remembered family via last-focused
+  // retention. An uncached foreground PID never blocks this pass on CIM: the
+  // targeted refresh runs in the background (once per non-host PID) and
+  // queues a new pass only when it found a terminal host or AI tool.
   // Hook-only mode (PROCESS_DETECTION=off) has no PID attribution: skip the
   // watcher/oneshot census entirely so hook tests stay deterministic and never
   // inherit the real user foreground; newest-hook wins when no AI focus exists.
@@ -492,18 +817,35 @@ async function runFastPass(generation: number): Promise<void> {
     competingForegroundPid = typeof foregroundPid === 'number' || foregroundPid === null ? foregroundPid : undefined;
     if (typeof foregroundPid === 'number' && foregroundPid > 0) {
       if (!getCachedProcessByPid(foregroundPid)) {
-        try {
-          await refreshProcessForPid(foregroundPid);
-        } catch (error) {
-          debugLog(`Foreground refresh failed for ${foregroundPid}: ${error instanceof Error ? error.message : String(error)}`);
-        }
+        const refreshPid = foregroundPid;
+        void refreshProcessForPid(refreshPid)
+          .then((found) => {
+            if (!shuttingDown && found.some((proc) => isHostOrAiProcess(proc))) {
+              requestFastUpdate('foreground-refresh');
+            }
+          })
+          .catch((error: unknown) => {
+            debugLog(`Foreground refresh failed for ${refreshPid}: ${error instanceof Error ? error.message : String(error)}`);
+          });
       }
 
-      currentForegroundFamily = familyForForegroundProcess(
+      const foregroundFamilies = familiesForForegroundProcess(
         foregroundPid,
         getCachedProcessList(),
         toolProviders
       );
+      if (foregroundFamilies.length === 1) {
+        currentForegroundFamily = foregroundFamilies[0];
+      } else if (foregroundFamilies.length > 1) {
+        // One host (WindowsTerminal tabs) runs several tools: restrict to
+        // those families and pick the most recent hook activity among them.
+        currentForegroundFamily = pickAmbiguousForegroundFamily(
+          foregroundFamilies,
+          displayable,
+          (tool) => toolFamilyForTool(tool)
+        );
+        debugLog(`Foreground host is shared by ${foregroundFamilies.join(', ')}; picked ${currentForegroundFamily || 'none'}.`);
+      }
     }
   }
 
@@ -543,7 +885,8 @@ async function runFastPass(generation: number): Promise<void> {
   // A newer event arrived while this pass was working: abort before any RPC
   // write so stale A is never republished after B. The queued pass reruns
   // with the latest focus/state.
-  if (fastQueued && !shuttingDown) {
+  if (fastQueued && !shuttingDown && consecutiveFastAborts < MAX_CONSECUTIVE_FAST_ABORTS) {
+    consecutiveFastAborts += 1;
     debugLog(`Fast pass ${generation} aborted before enrich (newer event queued).`);
     return;
   }
@@ -558,10 +901,11 @@ async function runFastPass(generation: number): Promise<void> {
     const desktopFgFamily = currentForegroundFamily;
     const desktopFgIsDesktop = typeof desktopFgPid === 'number' && desktopFgPid > 0 && claudeDesktopProviderMatchesPid(desktopFgPid);
     if (desktopFgIsDesktop && typeof desktopFgPid === 'number') {
+      touchVerifiedClaudeDesktopModel(desktopFgPid);
       ensureClaudeDesktopModelTracker(desktopFgPid);
       const verified = getVerifiedDesktopModelForDisplay();
       if (verified) {
-        desktopOverride = { kind: 'model', model: verified };
+        desktopOverride = { kind: 'model', model: verified.model };
       } else {
         // Desktop foreground without a verified model: fail closed to
         // app-only so a stale background CLI label is never attached.
@@ -576,12 +920,14 @@ async function runFastPass(generation: number): Promise<void> {
         desktopOverride = null;
       } else if (desktopFgFamily === null) {
         // Non-AI/unknown foreground (Discord/browser/plain terminal): retain
-        // the last verified Desktop model while its PID stays alive, fresh,
-        // and package-bound. Other-AI foreground takes the no-override path
-        // below (that AI displays; the Desktop cache stays parked).
+        // the last verified Desktop model while its PID stays alive, its last
+        // observation is under 10 minutes old, and it is package-bound. The
+        // retained label applies only to the Desktop surface: a Claude Code
+        // hook with newer activity keeps its own model. Other-AI foreground
+        // takes the no-override path below (the Desktop cache stays parked).
         const retained = getVerifiedDesktopModelForDisplay();
         if (retained) {
-          desktopOverride = { kind: 'model', model: retained };
+          desktopOverride = { kind: 'retained', model: retained.model, observedAt: retained.observedAt };
         } else {
           clearVerifiedClaudeDesktopModel();
           desktopOverride = null;
@@ -596,10 +942,15 @@ async function runFastPass(generation: number): Promise<void> {
 
   const activeTools = await enrichToolsForPresence(museResolvedTools);
 
-  if (fastQueued && !shuttingDown) {
+  if (fastQueued && !shuttingDown && consecutiveFastAborts < MAX_CONSECUTIVE_FAST_ABORTS) {
+    consecutiveFastAborts += 1;
     debugLog(`Fast pass ${generation} aborted before publish (newer event queued).`);
     return;
   }
+  if (fastQueued) {
+    debugLog(`Fast pass ${generation} publishing despite a queued event (${consecutiveFastAborts} consecutive aborts).`);
+  }
+  consecutiveFastAborts = 0;
 
   const withDesktop = desktopOverride ? applyClaudeDesktopDisplayOverride(activeTools, desktopOverride) : activeTools;
 
@@ -637,14 +988,17 @@ function scheduleWatcherRestart(): void {
     return;
   }
 
-  const delay = Math.max(0, 1000 - (Date.now() - lastWatcherRestartAt));
+  // Exponential backoff (1s, 2s, 4s ... 60s cap), reset after a healthy run;
+  // the oneshot fallback covers the gap.
+  // (No give-up limit for the foreground sampler: noteExit never returns null.)
+  const delay = foregroundWatcherBackoff.noteExit() ?? HELPER_RESTART_CAP_MS;
+  debugLog(`Foreground watcher restart in ${delay}ms (failure ${foregroundWatcherBackoff.failures}).`);
   watcherRestartTimer = setTimeout(() => {
     watcherRestartTimer = null;
     if (shuttingDown) {
       return;
     }
 
-    lastWatcherRestartAt = Date.now();
     try {
       stopForegroundWatcher();
     } catch (_) {
@@ -698,6 +1052,7 @@ function startForegroundWatcherIfNeeded(): void {
   );
 
   if (handle) {
+    foregroundWatcherBackoff.noteStart(null);
     const stats = getForegroundWatcherStats();
     log(`Foreground watcher started (PID ${stats.pid}, ${stats.sampleMs}ms sampler).`);
   } else {
@@ -776,17 +1131,16 @@ function startStateWatcher(): void {
 }
 
 function startPolling(): void {
-  if (pollTimer) {
+  if (pollingStarted) {
     return;
   }
 
+  pollingStarted = true;
   startStateWatcher();
   startForegroundWatcherIfNeeded();
-  pollTimer = setInterval(() => {
-    void runSlowCensusOnce();
-  }, POLL_INTERVAL_MS);
   // Fast init renders hook tools immediately; the slow census then populates
-  // the process cache and triggers a second fast pass with full data.
+  // the process cache, triggers a second fast pass with full data, and
+  // schedules itself (active or idle interval).
   requestFastUpdate('init');
   void runSlowCensusOnce();
 }
@@ -802,7 +1156,7 @@ async function shutdown(signal: string): Promise<void> {
   log(`Received ${signal}. Shutting down.`);
 
   if (pollTimer) {
-    clearInterval(pollTimer);
+    clearTimeout(pollTimer);
     pollTimer = null;
   }
   stopStateWatcher();
@@ -831,13 +1185,9 @@ async function shutdown(signal: string): Promise<void> {
   }
 
   for (const state of rpcConnections.values()) {
-    try {
-      if (state.client) {
-        state.client.destroy();
-      }
-    } catch (_) {
-      // Ignore shutdown cleanup errors.
-    }
+    // destroy() is async and rejects on a null socket; the wrapper swallows
+    // that so shutdown never logs an unhandled rejection.
+    destroyRpcClient(state.client);
   }
 
   process.exit(0);
@@ -849,8 +1199,21 @@ process.on('unhandledRejection', (error) => {
   logError('Unhandled promise rejection', error);
 });
 process.on('uncaughtException', (error) => {
+  // State is unknown after an uncaught exception: log, free the lock so the
+  // next start is not refused, and exit non-zero.
+  // Other CLI commands (hooks) keep the previous log-only behavior.
   logError('Uncaught exception', error);
+  if (!daemonRunning) {
+    return;
+  }
+  if (error instanceof Error && error.stack) {
+    console.error(error.stack);
+  }
+  releaseDaemonLock();
+  process.exit(1);
 });
+
+let daemonRunning = false;
 
 export function startDaemon(): void {
   validateEnvironment();
@@ -858,6 +1221,7 @@ export function startDaemon(): void {
     log('Another daemon instance is already running. Exiting.');
     process.exit(0);
   }
+  daemonRunning = true;
   log(`Starting ${APP_TITLE} daemon.`);
   log(`Presence detail level: ${DETAIL_LEVEL}.`);
   startPolling();

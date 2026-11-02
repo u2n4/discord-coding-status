@@ -8,9 +8,9 @@ const test = require('node:test');
 
 const { isAntigravityProcess } = require('../dist/core/detection/tool-detection');
 const {
-  extractAntigravityModelFromTranscriptJsonl,
   getAntigravityStateFile,
   normalizeAntigravityModel,
+  pairFromGenerationRecord,
   parseAntigravityStateModel,
   readActiveAntigravityModel,
   readAntigravityStateModel
@@ -77,7 +77,20 @@ test('1. Muse Code uses its dedicated Discord Application ID and supports defaul
   assert.equal(customApps.get('muse').imageKey, DEFAULT_MUSE_IMAGE_KEY);
 });
 
-test('2. Antigravity process detection, provider registration, and model normalization', () => {
+test('2. Antigravity process detection, provider registration, and model normalization', (t) => {
+  // Isolate from the real ~/.gemini so learned records cannot change results.
+  const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'dcs-ag-empty-'));
+  const prevHome = process.env.DISCORD_CODING_STATUS_ANTIGRAVITY_HOME;
+  process.env.DISCORD_CODING_STATUS_ANTIGRAVITY_HOME = emptyHome;
+  t.after(() => {
+    if (prevHome === undefined) {
+      delete process.env.DISCORD_CODING_STATUS_ANTIGRAVITY_HOME;
+    } else {
+      process.env.DISCORD_CODING_STATUS_ANTIGRAVITY_HOME = prevHome;
+    }
+    fs.rmSync(emptyHome, { recursive: true, force: true });
+  });
+
   assert.equal(antigravityDesktopProvider.discord.defaultClientId, '1558457305995939962');
   assert.equal(DEFAULT_ANTIGRAVITY_CLIENT_ID, '1558457305995939962');
 
@@ -104,44 +117,32 @@ test('2. Antigravity process detection, provider registration, and model normali
   assert.equal(normalizeAntigravityModel('Claude Opus 4.6 (Thinking)'), 'Claude Opus 4.6');
   assert.equal(normalizeAntigravityModel('auto'), null);
 
-  const sampleTranscript = [
-    JSON.stringify({
-      step_index: 1,
-      type: 'USER_INPUT',
-      content: '<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Gemini 3.1 Pro (High) to Claude Opus 4.6 (Thinking).\n</USER_SETTINGS_CHANGE>'
-    }),
-    JSON.stringify({
-      step_index: 5,
-      type: 'USER_INPUT',
-      content: '<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Claude Opus 4.6 (Thinking) to Gemini 4 Argon (Medium).\n</USER_SETTINGS_CHANGE>'
-    })
-  ].join('\n');
-
-  assert.equal(
-    extractAntigravityModelFromTranscriptJsonl(sampleTranscript),
-    'Gemini 4 Argon'
-  );
-
+  // Placeholders resolve only to provider ids proven by Antigravity's own
+  // generation records; an unproven placeholder stays app-only.
   assert.equal(
     parseAntigravityStateModel('last_selected_agent_model:  MODEL_PLACEHOLDER_M318'),
-    'Gemini 3.8 Flash'
+    'gemini-3.8-flash-n'
   );
   assert.equal(
-    parseAntigravityStateModel('last_selected_agent_model:  MODEL_PLACEHOLDER_M408'),
-    'Gemini 4 Argon'
+    parseAntigravityStateModel('last_selected_agent_model:  MODEL_PLACEHOLDER_M418'),
+    'gemini-4-argon-trial'
   );
   assert.equal(
-    parseAntigravityStateModel('last_selected_agent_model:  MODEL_PLACEHOLDER_M401'),
-    'Claude Opus 5.5'
+    parseAntigravityStateModel('last_selected_agent_model:  MODEL_PLACEHOLDER_M402'),
+    'claude-opus-5-5-high'
   );
   assert.equal(
     parseAntigravityStateModel('last_selected_agent_model:  MODEL_PLACEHOLDER_M404'),
-    'Claude Sonnet 5.5'
+    null,
+    'Sonnet/Opus split is unproven for M404: must not guess'
   );
-  assert.equal(
-    parseAntigravityStateModel('last_selected_agent_model:  MODEL_OPENAI_GPT_OSS_120B_MEDIUM'),
-    'GPT OSS 120B'
+
+  assert.deepEqual(
+    pairFromGenerationRecord(Buffer.from('\u0012\u0016MODEL_PLACEHOLDER_M402\u001a\u0014claude-opus-5-5-high\u0000')),
+    ['MODEL_PLACEHOLDER_M402', 'claude-opus-5-5-high']
   );
+  assert.equal(pairFromGenerationRecord(Buffer.from('RESOURCE_EXHAUSTED MODEL_PLACEHOLDER_M404')), null);
+  assert.equal(pairFromGenerationRecord(Buffer.alloc(30_000, 97)), null);
 });
 
 test('3. Antigravity hooks install cleanly and antigravity-hook outputs valid JSON', async (t) => {
@@ -159,12 +160,17 @@ test('3. Antigravity hooks install cleanly and antigravity-hook outputs valid JS
     'transcript.jsonl'
   );
   fs.mkdirSync(path.dirname(transcriptFile), { recursive: true });
+  // The transcript names a model the user typed about; it must be ignored.
   fs.writeFileSync(
     transcriptFile,
     `${JSON.stringify({
       step_index: 2,
       content: '<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Claude Sonnet 4.6 (Thinking) to Gemini 4 Argon (Medium).\n</USER_SETTINGS_CHANGE>'
     })}\n`
+  );
+  fs.writeFileSync(
+    path.join(antigravityHome, 'antigravity_state.pbtxt'),
+    'last_selected_agent_model:  MODEL_PLACEHOLDER_M418\n'
   );
 
   const hookInput = JSON.stringify({
@@ -186,24 +192,8 @@ test('3. Antigravity hooks install cleanly and antigravity-hook outputs valid JS
   const session = state.sessions[convId];
   assert.ok(session);
   assert.equal(session.tool, 'antigravity');
-  assert.equal(session.model, 'Gemini 4 Argon');
+  assert.equal(session.model, 'gemini-4-argon-trial');
 
-  // Verify self-referential regex lines in MODEL/GENERIC steps are ignored and dotted models work
-  const noisyTranscript = [
-    JSON.stringify({
-      step_index: 0,
-      source: 'USER_EXPLICIT',
-      type: 'USER_INPUT',
-      content: '<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3.8 Flash (High). No need to comment on this change.\n</USER_SETTINGS_CHANGE>'
-    }),
-    JSON.stringify({
-      step_index: 1,
-      source: 'MODEL',
-      type: 'GENERIC',
-      content: 'const MODEL_SELECTION_REGEX = /changed setting `Model Selection` from .*? to `?([^`.\\r\\n]+)`?\\.?/i;'
-    })
-  ].join('\n');
-  assert.equal(extractAntigravityModelFromTranscriptJsonl(noisyTranscript), 'Gemini 3.8 Flash');
   assert.equal(session.status, 'thinking');
 });
 
@@ -362,5 +352,7 @@ test('6. Grok session summary.json and Muse settings.json model resolution', asy
     details: 'Using Muse',
     state: 'Muse Code'
   });
-  assert.equal(enrichedMuse.details, 'Model: muse-spark');
+  // settings.json is the global default, not this session's model: a hook
+  // session without a bound model stays app-only.
+  assert.equal(enrichedMuse.details, '');
 });

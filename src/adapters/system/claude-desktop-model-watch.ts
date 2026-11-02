@@ -497,7 +497,16 @@ export interface VerifiedClaudeDesktopModel {
   pid: number;
   model: string;
   updatedAt: number;
+  /** Last time the Desktop window was seen focused (or the model re-read). */
+  observedAt: number;
 }
+
+/**
+ * How long a verified Desktop model may be retained without a fresh Desktop
+ * observation (focus or helper event). Past this age the label is dropped and
+ * Claude falls back to app-only / its own CLI model.
+ */
+export const CLAUDE_DESKTOP_MODEL_RETENTION_MS = 10 * 60_000;
 
 let verifiedDesktopModel: VerifiedClaudeDesktopModel | null = null;
 
@@ -505,7 +514,7 @@ export function getVerifiedClaudeDesktopModel(): VerifiedClaudeDesktopModel | nu
   return verifiedDesktopModel ? { ...verifiedDesktopModel } : null;
 }
 
-export function setVerifiedClaudeDesktopModel(pid: number, model: string): void {
+export function setVerifiedClaudeDesktopModel(pid: number, model: string, now = Date.now()): void {
   if (!Number.isFinite(pid) || Math.floor(pid) <= 0) {
     return;
   }
@@ -516,7 +525,25 @@ export function setVerifiedClaudeDesktopModel(pid: number, model: string): void 
   if (!label || label.length > CLAUDE_DESKTOP_MODEL_LABEL_MAX_LENGTH) {
     return;
   }
-  verifiedDesktopModel = { pid: Math.floor(pid), model: label, updatedAt: Date.now() };
+  verifiedDesktopModel = { pid: Math.floor(pid), model: label, updatedAt: now, observedAt: now };
+}
+
+/** Refreshes the observation time while the bound Desktop PID is focused. */
+export function touchVerifiedClaudeDesktopModel(pid: number, now = Date.now()): void {
+  if (verifiedDesktopModel && verifiedDesktopModel.pid === Math.floor(pid)) {
+    verifiedDesktopModel = { ...verifiedDesktopModel, observedAt: now };
+  }
+}
+
+export function isVerifiedClaudeDesktopModelFresh(
+  entry: VerifiedClaudeDesktopModel | null,
+  now = Date.now()
+): boolean {
+  if (!entry || !Number.isFinite(entry.observedAt)) {
+    return false;
+  }
+  const age = now - entry.observedAt;
+  return age >= 0 && age <= CLAUDE_DESKTOP_MODEL_RETENTION_MS;
 }
 
 export function clearVerifiedClaudeDesktopModel(): void {
@@ -527,10 +554,23 @@ export function resetClaudeDesktopModelCacheForTests(): void {
   verifiedDesktopModel = null;
 }
 
+/**
+ * - `model` / `app-only`: the Claude Desktop window IS the foreground, so the
+ *   Claude family entry is shown as the Desktop surface (a background CLI hook
+ *   never supplies the label while Desktop is focused).
+ * - `retained`: Desktop is NOT focused (Discord/browser/unknown foreground).
+ *   The Desktop label is kept only for the Desktop tool itself, or for a
+ *   Claude entry with no newer hook evidence than the last Desktop
+ *   observation. A Claude Code hook tool with newer activity keeps its own
+ *   model (never relabelled).
+ */
 export type ClaudeDesktopDisplayOverride =
   | { kind: 'model'; model: string }
   | { kind: 'app-only' }
+  | { kind: 'retained'; model: string; observedAt: number }
   | null;
+
+export const CLAUDE_DESKTOP_PROVIDER_ID = 'claudeApp';
 
 function truncateDesktopDetails(value: string): string {
   // Mirrors presence-text truncation (128, ellipsis) for already-trimmed
@@ -540,6 +580,19 @@ function truncateDesktopDetails(value: string): string {
     return text;
   }
   return text.slice(0, 125) + '...';
+}
+
+function retainedOverrideApplies(tool: ActiveTool, observedAt: number): boolean {
+  if (tool.providerId === CLAUDE_DESKTOP_PROVIDER_ID) {
+    return true;
+  }
+  if (tool.source !== 'hook') {
+    // Process-only Claude Code carries no activity timestamp (re-stamped each
+    // poll), so it is no evidence against the last Desktop observation.
+    return true;
+  }
+  const hookAt = typeof tool.updatedAt === 'number' && Number.isFinite(tool.updatedAt) ? tool.updatedAt : 0;
+  return hookAt <= observedAt;
 }
 
 export function applyClaudeDesktopDisplayOverride(
@@ -558,16 +611,96 @@ export function applyClaudeDesktopDisplayOverride(
     if (!tool || tool.family !== 'claude') {
       return tool;
     }
+    if (override.kind === 'retained' && !retainedOverrideApplies(tool, override.observedAt)) {
+      return tool;
+    }
     touched = true;
+    const desktop = { ...tool, providerId: CLAUDE_DESKTOP_PROVIDER_ID };
     if (override.kind === 'app-only') {
-      return { ...tool, details: '', state: '' };
+      return { ...desktop, details: '', state: '', model: null };
     }
     const label = override.model.trim();
     if (!label) {
-      return { ...tool, details: '', state: '' };
+      return { ...desktop, details: '', state: '', model: null };
     }
-    return { ...tool, details: truncateDesktopDetails('Model: ' + label), state: '' };
+    return { ...desktop, details: truncateDesktopDetails('Model: ' + label), state: '', model: label };
   });
 
   return touched ? next : [...tools];
+}
+
+/**
+ * Restart policy for the persistent PowerShell helpers (UIA model sampler and
+ * foreground sampler): exponential backoff 1s, 2s, 4s ... capped at 60s,
+ * reset after a healthy run, and an optional give-up after N consecutive
+ * failures for the same target key (e.g. Desktop PID) until the key changes.
+ */
+export const HELPER_RESTART_BASE_MS = 1000;
+export const HELPER_RESTART_CAP_MS = 60_000;
+export const HELPER_HEALTHY_RUN_MS = 30_000;
+
+export function helperRestartDelayMs(consecutiveFailures: number): number {
+  const failures = Math.max(1, Math.floor(Number.isFinite(consecutiveFailures) ? consecutiveFailures : 1));
+  return Math.min(HELPER_RESTART_CAP_MS, HELPER_RESTART_BASE_MS * 2 ** Math.min(failures - 1, 16));
+}
+
+export class HelperRestartBackoff {
+  failures = 0;
+  key: number | null = null;
+  startedAt = 0;
+  nextStartAt = 0;
+
+  constructor(private readonly giveUpAfter = Number.POSITIVE_INFINITY) {}
+
+  /** Records a helper start for `key`; a new key clears failure history. */
+  noteStart(key: number | null, now = Date.now()): void {
+    if (key !== this.key) {
+      this.failures = 0;
+      this.nextStartAt = 0;
+      this.key = key;
+    }
+    this.startedAt = now;
+  }
+
+  /** Records an unexpected exit; returns the delay before the next start, or null when given up. */
+  noteExit(now = Date.now()): number | null {
+    if (this.startedAt > 0 && now - this.startedAt >= HELPER_HEALTHY_RUN_MS) {
+      this.failures = 0;
+    }
+    this.failures += 1;
+    this.startedAt = 0;
+    if (this.failures >= this.giveUpAfter) {
+      this.nextStartAt = Number.POSITIVE_INFINITY;
+      return null;
+    }
+    const delay = helperRestartDelayMs(this.failures);
+    this.nextStartAt = now + delay;
+    return delay;
+  }
+
+  /** Records an intentional stop (focus left): a long enough run counts as healthy. */
+  noteStop(now = Date.now()): void {
+    if (this.startedAt > 0 && now - this.startedAt >= HELPER_HEALTHY_RUN_MS) {
+      this.failures = 0;
+    }
+    this.startedAt = 0;
+  }
+
+  canStart(key: number | null, now = Date.now()): boolean {
+    if (key !== this.key) {
+      return true;
+    }
+    return now >= this.nextStartAt;
+  }
+
+  isGivenUp(key: number | null): boolean {
+    return key === this.key && this.nextStartAt === Number.POSITIVE_INFINITY;
+  }
+
+  reset(): void {
+    this.failures = 0;
+    this.key = null;
+    this.startedAt = 0;
+    this.nextStartAt = 0;
+  }
 }
