@@ -1,6 +1,6 @@
 'use strict';
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ProcessInfo } from '../../core/tools/types';
 
@@ -83,25 +83,182 @@ export function parseWindowsProcessListJson(stdout: string): ProcessInfo[] {
     .filter((processInfo): processInfo is ProcessInfo => Boolean(processInfo));
 }
 
-async function getWindowsProcessList(): Promise<ProcessInfo[]> {
-  const filter = "Name='node.exe' OR Name='bun.exe' OR Name='claude.exe' OR Name='codex.exe' OR Name='ChatGPT.exe' OR Name='grok.exe' OR Name='Antigravity.exe' OR Name='Cursor.exe' OR Name='opencode.exe' OR Name='pi.exe' OR Name='pwsh.exe' OR Name='powershell.exe' OR Name='cmd.exe' OR Name='WindowsTerminal.exe' OR Name='conhost.exe' OR Name='OpenConsole.exe' OR Name LIKE 'muse%'";
-  const command = [
-    `@(Get-CimInstance Win32_Process -Filter "${filter}" |`,
-    'Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,UserModeTime,KernelModeTime,CreationDate) |',
-    'ConvertTo-Json -Compress'
-  ].join(' ');
+const WINDOWS_CENSUS_FILTER = "Name='node.exe' OR Name='bun.exe' OR Name='claude.exe' OR Name='codex.exe' OR Name='ChatGPT.exe' OR Name='grok.exe' OR Name='Antigravity.exe' OR Name='agy.exe' OR Name='Cursor.exe' OR Name='opencode.exe' OR Name='pi.exe' OR Name='pwsh.exe' OR Name='powershell.exe' OR Name='cmd.exe' OR Name='WindowsTerminal.exe' OR Name='conhost.exe' OR Name='OpenConsole.exe' OR Name LIKE 'muse%'";
+const WINDOWS_CENSUS_QUERY = [
+  `@(Get-CimInstance Win32_Process -Filter "${WINDOWS_CENSUS_FILTER}" |`,
+  'Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,UserModeTime,KernelModeTime,CreationDate) |',
+  'ConvertTo-Json -Compress'
+].join(' ');
+
+async function getWindowsProcessListOneShot(): Promise<ProcessInfo[]> {
   const { stdout } = await execFileAsync('powershell.exe', [
     '-NoProfile',
     '-ExecutionPolicy',
     'Bypass',
     '-Command',
-    command
+    WINDOWS_CENSUS_QUERY
   ], {
     timeout: PS_TIMEOUT_MS,
     maxBuffer: 4 * 1024 * 1024
   }) as { stdout: string };
 
   return parseWindowsProcessListJson(stdout);
+}
+
+// --- persistent census helper ----------------------------------------------
+// Starting powershell.exe costs ~0.6 s of CPU, which dominated the daemon's
+// footprint at one census every 10 s. The daemon (only the daemon: short CLI
+// commands keep the one-shot path) keeps ONE PowerShell alive and asks it for
+// each census over stdin. The helper exits by itself when the daemon's pipe
+// closes, so it cannot outlive a crashed or killed daemon. Any failure falls
+// back to the one-shot spawn; repeated failures disable the helper for a while.
+
+const CENSUS_END_MARKER = '<<dcs-census-end>>';
+const CENSUS_HELPER_SCRIPT = [
+  '$ErrorActionPreference = "Stop"',
+  '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+  'while ($true) {',
+  '  $request = [Console]::In.ReadLine()',
+  '  if ($null -eq $request) { break }',
+  `  try { $json = ${WINDOWS_CENSUS_QUERY}; if ($json) { [Console]::Out.WriteLine($json) } } catch { [Console]::Out.WriteLine("!" + $_.Exception.Message) }`,
+  `  [Console]::Out.WriteLine("${CENSUS_END_MARKER}")`,
+  '  [Console]::Out.Flush()',
+  '}'
+].join('\n');
+const CENSUS_HELPER_FAILURE_LIMIT = 3;
+const CENSUS_HELPER_COOLDOWN_MS = 10 * 60_000;
+
+let persistentCensusEnabled = false;
+let censusHelper: ChildProcessWithoutNullStreams | null = null;
+let censusBuffer = '';
+let censusPending: { resolve: (rows: string) => void; reject: (error: Error) => void; timer: NodeJS.Timeout } | null = null;
+let censusChain: Promise<unknown> = Promise.resolve();
+let censusFailures = 0;
+let censusDisabledUntil = 0;
+
+export function enablePersistentProcessCensus(enabled = true): void {
+  persistentCensusEnabled = enabled && process.platform === 'win32';
+  if (!persistentCensusEnabled) {
+    stopCensusHelper();
+  }
+}
+
+export function stopCensusHelper(): void {
+  const child = censusHelper;
+  censusHelper = null;
+  censusBuffer = '';
+  if (censusPending) {
+    clearTimeout(censusPending.timer);
+    censusPending.reject(new Error('census helper stopped'));
+    censusPending = null;
+  }
+  if (child) {
+    try {
+      child.stdin.end();
+    } catch (_) {}
+    try {
+      child.kill();
+    } catch (_) {}
+  }
+}
+
+function startCensusHelper(): ChildProcessWithoutNullStreams {
+  const child = spawn('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    CENSUS_HELPER_SCRIPT
+  ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => {
+    censusBuffer += chunk;
+    const markerAt = censusBuffer.indexOf(CENSUS_END_MARKER);
+    if (markerAt < 0 || !censusPending) {
+      return;
+    }
+    const body = censusBuffer.slice(0, markerAt).trim();
+    censusBuffer = censusBuffer.slice(markerAt + CENSUS_END_MARKER.length).replace(/^\r?\n/, '');
+    const pending = censusPending;
+    censusPending = null;
+    clearTimeout(pending.timer);
+    if (body.startsWith('!')) {
+      pending.reject(new Error(`census helper query failed: ${body.slice(1, 200)}`));
+    } else {
+      pending.resolve(body);
+    }
+  });
+  child.stderr.resume();
+  const onGone = () => {
+    if (censusHelper === child) {
+      censusHelper = null;
+      censusBuffer = '';
+    }
+    if (censusPending) {
+      const pending = censusPending;
+      censusPending = null;
+      clearTimeout(pending.timer);
+      pending.reject(new Error('census helper exited'));
+    }
+  };
+  child.on('exit', onGone);
+  child.on('error', onGone);
+  // Never keep the daemon's event loop alive on the helper's account.
+  child.unref();
+  (child.stdin as unknown as { unref?: () => void }).unref?.();
+  (child.stdout as unknown as { unref?: () => void }).unref?.();
+  (child.stderr as unknown as { unref?: () => void }).unref?.();
+  return child;
+}
+
+function queryCensusHelper(): Promise<string> {
+  const run = () => new Promise<string>((resolve, reject) => {
+    if (!censusHelper) {
+      censusHelper = startCensusHelper();
+    }
+    const child = censusHelper;
+    const timer = setTimeout(() => {
+      if (censusPending) {
+        censusPending = null;
+        reject(new Error('census helper timed out'));
+      }
+      // A wedged helper is replaced on the next request.
+      if (censusHelper === child) {
+        stopCensusHelper();
+      }
+    }, PS_TIMEOUT_MS);
+    censusPending = { resolve, reject, timer };
+    try {
+      child.stdin.write('census\n');
+    } catch (error) {
+      clearTimeout(timer);
+      censusPending = null;
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+  // One request at a time over the single pipe.
+  const next = censusChain.then(run, run);
+  censusChain = next.catch(() => {});
+  return next;
+}
+
+async function getWindowsProcessList(): Promise<ProcessInfo[]> {
+  if (persistentCensusEnabled && Date.now() >= censusDisabledUntil) {
+    try {
+      const rows = parseWindowsProcessListJson(await queryCensusHelper());
+      censusFailures = 0;
+      return rows;
+    } catch (_) {
+      censusFailures += 1;
+      if (censusFailures >= CENSUS_HELPER_FAILURE_LIMIT) {
+        censusFailures = 0;
+        censusDisabledUntil = Date.now() + CENSUS_HELPER_COOLDOWN_MS;
+        stopCensusHelper();
+      }
+    }
+  }
+  return getWindowsProcessListOneShot();
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

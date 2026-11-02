@@ -8,13 +8,19 @@ Discord shows ONLY:
 
 ```text
 Playing <App>          <- Discord application identity per tool
-Model: <raw model id>  <- details line, or absent when the model is unknown
+Model: <app label>     <- details line, or absent when the model is unknown
 ```
 
 Never sent: `startTimestamp`, activity, status, project, branch, package,
 quota, context, effort, emoji, session counts. `SHOW_*`, detail levels, and
-activity styles in config are inert. Model ids are raw (never guessed or
-prettified); unknown model = application name only.
+activity styles in config are inert. The model is resolved from evidence
+(never guessed), then shown the way the tool itself writes it (Ali,
+2026-11-03): `src/providers/model-label.ts` maps a resolved id to the tool's
+own label, from the tool's model list where one exists (Codex and Grok
+`models_cache.json`, `agy models`), effort brackets dropped: "Opus 5.5",
+"GPT-6.1 Sol" (Codex Desktop) / "GPT-6.1-Sol" (Codex CLI), "Gemini 4 Argon",
+"Grok 4.7", "Muse Spark 1.3". An id with no known label is shown unchanged;
+unknown model = application name only.
 
 ## How each tool resolves
 
@@ -26,12 +32,13 @@ prettified); unknown model = application name only.
 | Claude Desktop app | Claude.exe foreground window/process/package + UI Automation | Model selector button first text child (positive HWND/PID binding; Menu/ambiguous/missing fail closed to app-only); background CLI hook never overrides |
 | Muse Code | Lifecycle hooks + process | Hook input `model` per bound session (global `settings.json` is never shown) (receiver ancestor PID+creation binding; foreground-associated or retained instance wins, ambiguity fails app-only); headless `exec --session-id <UUID>` keeps its guarded process model; explicit hook `--model` still wins |
 | Grok Code | Lifecycle hooks + process | Hook input explicit top-level model, or the bound session's `summary.json` `current_model_id` (config default and nested `tool_input` fields are never used; unbound stays app-only) |
+| Antigravity CLI (`agy`) | Process (`agy.exe`) + the shared hooks.json | Last `Propagating selected model override to backend: label="..."` in `~/.gemini/antigravity-cli/cli.log`, else `settings.json` `model` |
 | Antigravity | Hooks + process | `last_selected_agent_model` placeholder in `antigravity_state.pbtxt`, resolved only through pairs learned from its own `conversations/*.db` `gen_metadata` records (seeded); unknown placeholder = app-only. Transcripts are never mined |
 | OpenCode / Cursor / Pi | Process only | None (application name only) |
 
 Selection: hook sessions outrank process detection; the Windows foreground
 window (including terminal descendants) outranks everything when several
-displayable tools compete; with no focused or remembered family, Claude wins over Codex regardless of source. Within Muse, competing hook sessions resolve by positive instance binding: the session bound to the Muse PID under the focused console wins, else the retained last-focused instance, else app-only (never newest-hook). Tools without a Discord application ID are
+displayable tools compete; with no focused or remembered family, Claude wins over Codex regardless of source. Within one family the desktop app wins over its CLI unless a terminal running that CLI is in front (`foregroundSurfaceForProcess`). Within Muse, competing hook sessions resolve by positive instance binding: the session bound to the Muse PID under the focused console wins, else the retained last-focused instance, else app-only (never newest-hook). Tools without a Discord application ID are
 excluded from selection so they can never blank a configured tool.
 
 ## Runtime layout on this machine
@@ -41,6 +48,12 @@ excluded from selection so they can never blank a configured tool.
 - Config/state: `~/discord-coding-status/config.json`, `states.json`.
 - Startup: Scheduled Task `DiscordCodingStatus` (ONLOGON, hidden VBS, no console).
 - Logs: `%LOCALAPPDATA%/discord-coding-status/logs/`.
+
+Background cost: one persistent PowerShell answers the process census over
+stdin (no per-census spawn), and the foreground helper is an event hook
+(`SetWinEventHook`) compiled once, not a polling loop. Never put a command line
+containing `discord-coding-status` and `daemon` in a filter that kills
+processes: setup now stops only node/bun running `cli.js daemon`.
 
 After changing `src/`, run `node dist/cli.js setup` from this repo to rebuild,
 re-copy the runtime, and restart the daemon. The daemon refuses a second

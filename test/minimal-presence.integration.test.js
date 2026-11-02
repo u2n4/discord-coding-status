@@ -1,7 +1,15 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
+
+// Model labels come from the tool's own model list; point Codex at an empty
+// home so the real ~/.codex/models_cache.json cannot change these results.
+process.env.CODEX_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'dcs-minimal-codex-'));
+
 const {
   buildPresence,
   enrichToolForPresence,
@@ -84,7 +92,7 @@ test('the foreground family wins over a more recent hook session', () => {
     key: 'museCli',
     family: 'muse',
     source: 'process',
-    details: 'Model: muse-spark-1.3',
+    details: 'Model: Muse Spark 1.3',
     state: '',
     updatedAt: now - 60_000
   };

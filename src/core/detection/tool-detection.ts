@@ -255,3 +255,9 @@ export function isAntigravityProcess(value: ProcessDescriptor | string): boolean
   return text.includes('/antigravity.app/contents/macos/antigravity')
     || (text.includes('/antigravity/') && /(?:^|[\s/])antigravity(?:\.exe)?(?:\s|$)/.test(text));
 }
+
+// Antigravity CLI (`agy`), a separate binary from the Antigravity desktop app.
+export function isAntigravityCliProcess(value: ProcessDescriptor | string): boolean {
+  const executable = executableBasename(value);
+  return executable === 'agy' || executable === 'agy.exe';
+}

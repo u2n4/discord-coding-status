@@ -192,7 +192,7 @@ test('a positively bound exec process shows its exact session model', async (t) 
   writeMuseSession('unrelated-session', ['muse-spark-9.9-unrelated']);
 
   const enriched = await enrichToolForPresence(museExecTool(execProcessInfo(42712, EXEC_UUID, startedAt)));
-  assert.equal(enriched.details, 'Model: muse-spark-1.3');
+  assert.equal(enriched.details, 'Model: Muse Spark 1.3');
   assert.equal(enriched.state, '');
 });
 

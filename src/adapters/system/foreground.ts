@@ -116,6 +116,30 @@ export function familiesForForegroundProcess(
   return [...families];
 }
 
+export type ForegroundSurface = 'app' | 'cli';
+
+/**
+ * 'app' when the foreground process itself is a desktop app (a provider with
+ * surface 'desktop': Claude.exe, Codex Desktop, Antigravity.exe), 'cli' when a
+ * tool runs under it (a terminal host), null when no tool owns it.
+ */
+export function foregroundSurfaceForProcess(
+  foregroundPid: number,
+  processes: readonly ProcessInfo[],
+  providers: readonly ToolProvider[]
+): ForegroundSurface | null {
+  const root = processes.find((process) => process.pid === foregroundPid);
+  if (!root) {
+    return null;
+  }
+  for (const provider of providers) {
+    if (provider.process && provider.presence && provider.process.surface === 'desktop' && provider.process.matches(root)) {
+      return 'app';
+    }
+  }
+  return familiesForForegroundProcess(foregroundPid, processes, providers).length > 0 ? 'cli' : null;
+}
+
 /**
  * Finds the ONE tool family that owns the foreground window. Returns null
  * when the foreground process is not a known tool or when several tool

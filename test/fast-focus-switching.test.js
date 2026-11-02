@@ -216,12 +216,12 @@ test('a selected bound model change applies with no new focus event', async (t) 
   };
 
   const first = await enrichToolForPresence(tool);
-  assert.equal(first.details, 'Model: muse-spark-1.3');
+  assert.equal(first.details, 'Model: Muse Spark 1.3');
 
   // Genuine model switch in the same bound session: no focus event involved.
   appendMuseModelRecord(file, EXEC_UUID, 'muse-spark-1.4', startedAt + 5000, 128);
   const second = await enrichToolForPresence(tool);
-  assert.equal(second.details, 'Model: muse-spark-1.4');
+  assert.equal(second.details, 'Model: Muse Spark 1.4');
 });
 
 test('a bound background exec never labels an unknown foreground TUI after a model change', async (t) => {
@@ -407,39 +407,36 @@ test('foreground watch toggle honors the off switch', (t) => {
   assert.equal(isForegroundWatchEnabled(), true);
 });
 
-test('sampler script calls Add-Type once, emits PID-only, and self-exits on parent death/stdin EOF', () => {
+test('sampler script compiles one event-driven helper, emits PID-only, and self-exits on parent death/stdin EOF', () => {
   const script = buildForegroundSamplerScript(4242, 120);
 
   const addTypeCount = (script.match(/Add-Type/g) || []).length;
   assert.equal(addTypeCount, 1, 'Add-Type must run once per helper lifetime');
 
+  assert.match(script, /SetWinEventHook\(3, 3,/, 'EVENT_SYSTEM_FOREGROUND hook, no polling loop in script');
   assert.match(script, /GetForegroundWindow/);
   assert.match(script, /GetWindowThreadProcessId/);
-  assert.match(script, /Get-Process -Id \$watchParent/);
-  assert.match(script, /BeginRead/);
-  assert.match(script, /EndRead/);
-  assert.match(script, /WaitOne\(0\)/);
-  assert.match(script, /Start-Sleep -Milliseconds/);
+  assert.match(script, /Process\.GetProcessById\(parent\)/, 'parent liveness is checked');
+  assert.match(script, /OpenStandardInput/, 'stdin EOF ends the helper');
+  assert.match(script, /Thread\.Sleep\(sampleMs\)/, 'polling fallback when the hook cannot be installed');
 
-  const writeCount = (script.match(/Write-Output/g) || []).length;
+  const writeCount = (script.match(/Console\.Out\.WriteLine/g) || []).length;
   assert.equal(writeCount, 1, 'exactly one PID-only emission point');
 
   assert.doesNotMatch(script, /WindowText/);
   assert.doesNotMatch(script, /GetTitle/);
   assert.doesNotMatch(script, /\.Title\b/);
-  assert.doesNotMatch(script, /\.Text\b/);
   // Never name a variable $pid (PowerShell automatic variable); sampler uses $watch*.
   assert.doesNotMatch(script, /\$pid\b/i);
 
   assert.match(script, /\$ErrorActionPreference='Stop'/, 'no blanket SilentlyContinue');
   assert.doesNotMatch(script, /SilentlyContinue/, 'startup/native errors must surface, not suppress');
-  assert.match(script, /\[uint32\]0/, 'out DWORD uses explicit uint32 for PS5.1');
   assert.match(script, /type-load failed/, 'Add-Type failure exits visibly');
   assert.match(script, /exit 2/, 'startup failure exits for fallback');
-  assert.match(script, /\$watchFail/, 'consecutive native failures are bounded');
-  assert.match(script, /exit 3/, 'native API failure exits for fallback');
+  assert.match(script, /failures >= 20/, 'consecutive native failures are bounded');
+  assert.match(script, /Environment\.Exit\(3\)/, 'native API failure exits for fallback');
   assert.match(script, /\$watchParent -le 0/, 'invalid parent PID is rejected in-script');
-  assert.match(script, /Write-Error/, 'failures go to stderr, stdout stays PID-only');
+  assert.match(script, /Console\.Error\.WriteLine|Write-Error/, 'failures go to stderr, stdout stays PID-only');
 });
 
 test('sampler script rejects an invalid parent PID instead of watching Idle (0)', () => {

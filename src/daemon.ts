@@ -17,8 +17,10 @@ import {
   resolveMuseDisplaySession
 } from './core/selection/muse-instance';
 import {
+  enablePersistentProcessCensus,
   getProcessList,
-  isProcessAlive
+  isProcessAlive,
+  stopCensusHelper
 } from './adapters/system/processes';
 import {
   getCachedProcessByPid,
@@ -115,6 +117,8 @@ import {
 } from './quota';
 import {
   familiesForForegroundProcess,
+  foregroundSurfaceForProcess,
+  type ForegroundSurface,
   getForegroundPid,
   musePidForForegroundProcess,
   pickAmbiguousForegroundFamily
@@ -607,11 +611,12 @@ function getWatcherForegroundPid(): number | null | undefined {
 
 function updateSelectedModelWatch(
   activeTools: Parameters<typeof selectNewestTool>[0],
-  effectivePreferred: string | null
+  effectivePreferred: string | null,
+  effectiveSurface: 'app' | 'cli' | null = null
 ): void {
   try {
     const displayable = activeTools.filter((tool) => clientIdForTool(tool));
-    const selected = selectNewestTool(displayable, effectivePreferred);
+    const selected = selectNewestTool(displayable, effectivePreferred, effectiveSurface);
     let file: string | null = null;
 
     if (selected) {
@@ -871,6 +876,7 @@ async function runFastPass(generation: number): Promise<void> {
   // inherit the real user foreground; newest-hook wins when no AI focus exists.
   let competingForegroundPid: number | null | undefined = undefined;
   let currentForegroundFamily: string | null = null;
+  let currentForegroundSurface: ForegroundSurface | null = null;
   if (PROCESS_DETECTION_ENABLED && displayable.length >= 1) {
     let foregroundPid = getWatcherForegroundPid();
 
@@ -904,6 +910,7 @@ async function runFastPass(generation: number): Promise<void> {
         getCachedProcessList(),
         toolProviders
       );
+      currentForegroundSurface = foregroundSurfaceForProcess(foregroundPid, getCachedProcessList(), toolProviders);
       if (foregroundFamilies.length === 1) {
         currentForegroundFamily = foregroundFamilies[0];
       } else if (foregroundFamilies.length > 1) {
@@ -1041,8 +1048,12 @@ async function runFastPass(generation: number): Promise<void> {
 
   const withDesktop = desktopOverride ? applyClaudeDesktopDisplayOverride(activeTools, desktopOverride) : activeTools;
 
-  await updateActivities(withDesktop, effectivePreferred);
-  updateSelectedModelWatch(withDesktop, effectivePreferred);
+  // The remembered family keeps app priority once its window loses focus.
+  const effectiveSurface = currentForegroundFamily && currentForegroundFamily === effectivePreferred
+    ? currentForegroundSurface
+    : null;
+  await updateActivities(withDesktop, effectivePreferred, effectiveSurface);
+  updateSelectedModelWatch(withDesktop, effectivePreferred, effectiveSurface);
 }
 
 async function runFastLoopOnce(): Promise<void> {
@@ -1249,6 +1260,7 @@ async function shutdown(signal: string): Promise<void> {
   stopStateWatcher();
   stopForegroundWatcherIfNeeded();
   stopClaudeDesktopModelTracker();
+  stopCensusHelper();
 
   try {
     unwatchSelectedModelFile();
@@ -1309,6 +1321,7 @@ export function startDaemon(): void {
     process.exit(0);
   }
   daemonRunning = true;
+  enablePersistentProcessCensus(process.env.DISCORD_CODING_STATUS_PERSISTENT_CENSUS !== '0');
   log(`Starting ${APP_TITLE} daemon.`);
   log(`Presence detail level: ${DETAIL_LEVEL}.`);
   startPolling();

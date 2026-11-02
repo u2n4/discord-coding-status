@@ -21,7 +21,6 @@ import { spawn, type ChildProcess } from 'node:child_process';
 export const FOREGROUND_WATCH_SAMPLE_MS_DEFAULT = 120;
 export const FOREGROUND_WATCH_SAMPLE_MS_MIN = 50;
 export const FOREGROUND_WATCH_SAMPLE_MS_MAX = 1000;
-const PARENT_CHECK_EVERY_TICKS = 8;
 
 export function resolveForegroundSampleMs(): number {
   const text = (process.env.DISCORD_CODING_STATUS_FOREGROUND_SAMPLE_MS ?? '').trim();
@@ -71,33 +70,46 @@ export function buildForegroundSamplerScript(parentPid: number, sampleMs: number
       Math.max(FOREGROUND_WATCH_SAMPLE_MS_MIN, flooredSample)
     );
 
-  // NOTE: never name a variable `$pid` (PowerShell automatic variable); every
-  // sampler variable uses the `$watch*` prefix. Only one Write-Output exists
-  // and it emits the numeric foreground PID (0 = unknown). Failures go to
-  // stderr (Write-Error) with a bounded exit so the daemon falls back to the
-  // oneshot path instead of staying healthy emitting 0 forever.
+  // The sampling loop runs as compiled C# inside the one PowerShell helper:
+  // SetWinEventHook(EVENT_SYSTEM_FOREGROUND) reports a focus change the moment
+  // it happens (no polling), and a 1 s timer re-reads the foreground window to
+  // catch anything the hook missed and checks that the parent daemon is still
+  // alive. stdin EOF (daemon gone or stopping) exits immediately. If the hook
+  // cannot be installed the helper falls back to polling every $watchSample ms.
+  // stdout stays PID-only (0 = unknown); failures go to stderr with exit 2/3 so
+  // the daemon falls back to the oneshot path. Never name a variable `$pid`
+  // (PowerShell automatic variable): script variables use the `$watch*` prefix.
+  const csharp = [
+    'using System; using System.Diagnostics; using System.Runtime.InteropServices; using System.Threading;',
+    'namespace Win32 { public static class ForegroundSampler {',
+    'public delegate void WinEventProc(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);',
+    '[StructLayout(LayoutKind.Sequential)] public struct Msg { public IntPtr hwnd; public uint message; public IntPtr wParam; public IntPtr lParam; public uint time; public int x; public int y; }',
+    '[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();',
+    '[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);',
+    '[DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr module, WinEventProc callback, uint processId, uint threadId, uint flags);',
+    '[DllImport("user32.dll")] static extern int GetMessage(out Msg msg, IntPtr hwnd, uint filterMin, uint filterMax);',
+    'static WinEventProc hookCallback; static Timer checkTimer; static int lastForeground = -1; static int failures = 0; static readonly object gate = new object();',
+    'static void Emit() { int foreground = 0; try { IntPtr hwnd = GetForegroundWindow(); if (hwnd != IntPtr.Zero) { uint owner = 0; uint thread = GetWindowThreadProcessId(hwnd, out owner); if (thread != 0 && owner != 0) { foreground = (int)owner; } } failures = 0; } catch (Exception error) { failures++; if (failures >= 20) { Console.Error.WriteLine("foreground sampler native API failed: " + error.Message); Environment.Exit(3); } }',
+    ' lock (gate) { if (foreground != lastForeground) { lastForeground = foreground; Console.Out.WriteLine(foreground); Console.Out.Flush(); } } }',
+    'public static int Run(int parent, int sampleMs) {',
+    ' Thread stdinWatch = new Thread(delegate() { try { System.IO.Stream input = Console.OpenStandardInput(); byte[] buffer = new byte[16]; while (input.Read(buffer, 0, buffer.Length) > 0) { } } catch { } Environment.Exit(0); });',
+    ' stdinWatch.IsBackground = true; stdinWatch.Start();',
+    ' checkTimer = new Timer(delegate(object state) { try { Process.GetProcessById(parent).Dispose(); } catch { Environment.Exit(0); } Emit(); }, null, 1000, 1000);',
+    ' hookCallback = new WinEventProc(delegate(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint thread, uint time) { Emit(); });',
+    ' IntPtr installed = SetWinEventHook(3, 3, IntPtr.Zero, hookCallback, 0, 0, 0);',
+    ' Emit();',
+    ' if (installed == IntPtr.Zero) { while (true) { Thread.Sleep(sampleMs); Emit(); } }',
+    ' Msg message; while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0) { }',
+    ' return 0; } } }'
+  ].join(' ');
+
   return [
     "$ErrorActionPreference='Stop'",
-    'try { Add-Type -Namespace Win32 -Name ForegroundSampler -MemberDefinition \'[DllImport("user32.dll")] public static extern System.IntPtr GetForegroundWindow(); [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint lpdwProcessId);\' | Out-Null } catch { Write-Error ("foreground sampler type-load failed: " + $_.Exception.Message); exit 2 }',
+    `try { Add-Type -TypeDefinition '${csharp}' | Out-Null } catch { Write-Error ("foreground sampler type-load failed: " + $_.Exception.Message); exit 2 }`,
     `$watchParent=${safeParent}`,
     'if ($watchParent -le 0) { Write-Error ("foreground sampler invalid parent"); exit 2 }',
     `$watchSample=${safeSample}`,
-    '$watchLast=-1',
-    '$watchTicks=0',
-    '$watchFail=0',
-    '$watchStdin=$null',
-    '$watchAsync=$null',
-    '$watchBuf=$null',
-    'try { $watchStdin=[Console]::OpenStandardInput(); $watchBuf=New-Object byte[] 16; $watchAsync=$watchStdin.BeginRead($watchBuf,0,$watchBuf.Length,$null,$null) } catch { $watchStdin=$null; $watchAsync=$null }',
-    'while ($true) {',
-    ' if ($watchAsync -ne $null) { try { if ($watchAsync.AsyncWaitHandle.WaitOne(0)) { try { $null=$watchStdin.EndRead($watchAsync) } catch {} exit 0 } } catch { exit 0 } }',
-    ` $watchTicks++; if (($watchTicks % ${PARENT_CHECK_EVERY_TICKS}) -eq 0) { try { $watchParentProc=Get-Process -Id $watchParent -ErrorAction Stop; if ($null -eq $watchParentProc) { exit 0 } } catch { exit 0 } }`,
-    ' $watchFg=0',
-    ' try { $watchHwnd=[Win32.ForegroundSampler]::GetForegroundWindow(); if ($watchHwnd -ne $null -and $watchHwnd -ne [IntPtr]::Zero) { $watchOwner=[uint32]0; $watchTid=[Win32.ForegroundSampler]::GetWindowThreadProcessId($watchHwnd,[ref]$watchOwner); if ($watchTid -ne 0 -and $watchOwner -ne 0) { $watchFg=[int]$watchOwner; $watchFail=0 } else { $watchFail++; $watchFg=0 } } else { $watchFail=0; $watchFg=0 } } catch { $watchFail++; $watchFg=0; if ($watchFail -ge 20) { Write-Error ("foreground sampler native API failed: " + $_.Exception.Message); exit 3 } }',
-    ' if ($watchFail -ge 20) { Write-Error ("foreground sampler native API failed consecutively"); exit 3 }',
-    ' if ($watchFg -ne $watchLast) { $watchLast=$watchFg; Write-Output $watchFg }',
-    ' Start-Sleep -Milliseconds $watchSample',
-    '}'
+    'exit [Win32.ForegroundSampler]::Run($watchParent, $watchSample)'
   ].join('; ');
 }
 

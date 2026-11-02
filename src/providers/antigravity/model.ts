@@ -364,3 +364,70 @@ export function readAntigravityStateModel(): AntigravityModelResult | null {
 export function readActiveAntigravityModel(_transcriptPath?: string | null): AntigravityModelResult | null {
   return readAntigravityStateModel();
 }
+
+// --- Antigravity CLI (agy) -------------------------------------------------
+// agy logs the model it actually uses each time the selection is applied:
+//   model_config_manager.go] Propagating selected model override to backend: label="Gemini 4 Argon (Medium)"
+// That label is exactly what `agy models` lists. settings.json "model" is the
+// persisted pick, which may be an alias the resolver maps elsewhere, so it is
+// only a fallback.
+
+const AGY_LOG_TAIL_BYTES = 64 * 1024;
+const AGY_LABEL_PATTERN = /Propagating selected model override to backend: label="([^"\r\n]{1,80})"/g;
+let cachedAgyModel: { filePath: string; mtimeMs: number; size: number; model: string | null } | null = null;
+
+export function getAntigravityCliHomeDir(): string {
+  const override = String(process.env.DISCORD_CODING_STATUS_ANTIGRAVITY_CLI_HOME || '').trim();
+  if (override) {
+    return path.resolve(override);
+  }
+  return path.join(os.homedir(), '.gemini', 'antigravity-cli');
+}
+
+export function parseAntigravityCliLogModel(text: string): string | null {
+  let last: string | null = null;
+  for (const match of text.matchAll(AGY_LABEL_PATTERN)) {
+    last = match[1].trim() || last;
+  }
+  return last;
+}
+
+function readAgyLogModel(filePath: string): string | null {
+  const stat = fs.statSync(filePath);
+  if (cachedAgyModel && cachedAgyModel.filePath === filePath
+    && cachedAgyModel.mtimeMs === stat.mtimeMs && cachedAgyModel.size === stat.size) {
+    return cachedAgyModel.model;
+  }
+  const length = Math.min(stat.size, AGY_LOG_TAIL_BYTES);
+  const buffer = Buffer.alloc(length);
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    fs.readSync(fd, buffer, 0, length, stat.size - length);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const model = parseAntigravityCliLogModel(buffer.toString('utf8'));
+  cachedAgyModel = { filePath, mtimeMs: stat.mtimeMs, size: stat.size, model };
+  return model;
+}
+
+export function readAntigravityCliModel(): AntigravityModelResult | null {
+  const home = getAntigravityCliHomeDir();
+  const logFile = path.join(home, 'cli.log');
+  try {
+    const model = readAgyLogModel(logFile);
+    if (model) {
+      return { model, filePath: logFile, mtimeMs: fs.statSync(logFile).mtimeMs };
+    }
+  } catch (_) {
+    // No log yet: fall back to the persisted pick.
+  }
+  const settingsFile = path.join(home, 'settings.json');
+  try {
+    const parsed = JSON.parse(fs.readFileSync(settingsFile, 'utf8')) as { model?: unknown };
+    const model = typeof parsed.model === 'string' ? parsed.model.trim() : '';
+    return model ? { model, filePath: settingsFile, mtimeMs: fs.statSync(settingsFile).mtimeMs } : null;
+  } catch (_) {
+    return null;
+  }
+}

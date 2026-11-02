@@ -42,7 +42,11 @@ import { discordApplicationForTool } from './providers/discord';
 import { readMuseExecModelForProcess } from './providers/muse/model';
 import { readCodexConfiguredModel, readCodexDesktopModel } from './providers/codex/model';
 import { readGrokSessionSummaryModel } from './providers/grok/model';
-import { readActiveAntigravityModel, readAntigravityStatePlaceholder } from './providers/antigravity/model';
+import {
+  readActiveAntigravityModel,
+  readAntigravityCliModel,
+  readAntigravityStatePlaceholder
+} from './providers/antigravity/model';
 import { displayModelLabel } from './providers/model-label';
 import type { ActiveTool, ProcessInfo } from './core/tools/types';
 import type {
@@ -588,6 +592,11 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
         model = truncatePresenceText(resolved);
       }
     }
+  } else if (tool.family === 'antigravity' && tool.providerId === 'antigravityCli') {
+    const cli = readAntigravityCliModel();
+    if (cli?.model) {
+      model = truncatePresenceText(cli.model);
+    }
   } else if (tool.family === 'antigravity') {
     // The UI selection is written to antigravity_state.pbtxt the moment it
     // changes, so a resolved selection is fresher than any hook payload.
@@ -602,7 +611,7 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
 
   return {
     ...tool,
-    details: model ? truncatePresenceText(`Model: ${displayModelLabel(tool.family, model)}`) : '',
+    details: model ? truncatePresenceText(`Model: ${displayModelLabel(tool, model)}`) : '',
     state: ''
   };
 }
@@ -714,7 +723,24 @@ function sourceRank(tool: ActiveTool): number {
  * actually typing in. Stale hook sessions cannot block forever: they are pruned
  * from the state file after `STATE_MAX_AGE_MS`.
  */
-export function selectNewestTool(tools: ActiveTool[], preferredFamily: string | null = null): ActiveTool | null {
+function isAppSurface(tool: ActiveTool): boolean {
+  return typeof tool.providerId === 'string' && tool.providerId.endsWith('App');
+}
+
+// Within one family the desktop app wins, unless the user is working in that
+// tool's CLI right now (a terminal owns the foreground).
+function pickSurface(familyTools: ActiveTool[], preferredSurface: 'app' | 'cli' | null): ActiveTool | undefined {
+  if (preferredSurface === 'cli') {
+    return familyTools.find((tool) => !isAppSurface(tool)) || familyTools[0];
+  }
+  return familyTools.find((tool) => isAppSurface(tool)) || familyTools[0];
+}
+
+export function selectNewestTool(
+  tools: ActiveTool[],
+  preferredFamily: string | null = null,
+  preferredSurface: 'app' | 'cli' | null = null
+): ActiveTool | null {
   if (!tools.length) {
     return null;
   }
@@ -733,8 +759,10 @@ export function selectNewestTool(tools: ActiveTool[], preferredFamily: string | 
   // The foreground window wins: when the user is actively working in one of
   // the detected tools, that tool is shown even if another tool reported a
   // hook session more recently.
+  const inFamily = (family: string) => ordered.filter((tool) => toolFamilyForTool(tool) === family);
+
   if (preferredFamily) {
-    const foreground = ordered.find((tool) => toolFamilyForTool(tool) === preferredFamily);
+    const foreground = pickSurface(inFamily(preferredFamily), preferredSurface);
     if (foreground) {
       return foreground;
     }
@@ -744,21 +772,25 @@ export function selectNewestTool(tools: ActiveTool[], preferredFamily: string | 
   // Claude has aged out to process-only detection: a Codex hook (often a
   // subagent Claude started) must not take over the display on its own.
   if (toolFamilyForTool(ordered[0]) === 'codex') {
-    const claudeTool = ordered.find((tool) => toolFamilyForTool(tool) === 'claude');
+    const claudeTool = pickSurface(inFamily('claude'), null);
     if (claudeTool) {
       return claudeTool;
     }
   }
 
-  return ordered[0];
+  return pickSurface(inFamily(toolFamilyForTool(ordered[0])), null) || ordered[0];
 }
 
-export async function updateActivities(tools: ActiveTool[], preferredFamily: string | null = null): Promise<void> {
+export async function updateActivities(
+  tools: ActiveTool[],
+  preferredFamily: string | null = null,
+  preferredSurface: 'app' | 'cli' | null = null
+): Promise<void> {
   // Tools without a Discord application ID cannot display anything; excluding
   // them here (instead of selecting them) keeps a configured tool visible
   // instead of blanking Discord.
   const displayable = tools.filter((tool) => clientIdForTool(tool));
-  const newest = selectNewestTool(displayable, preferredFamily);
+  const newest = selectNewestTool(displayable, preferredFamily, preferredSurface);
   const newestClientId = newest ? clientIdForTool(newest) : null;
 
   if (!newest || !newestClientId) {

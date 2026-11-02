@@ -210,8 +210,29 @@ test('Antigravity clears an older hook model when the current pick is unknown', 
   assert.equal(enriched.details, '');
 });
 
-test('model labels read like each app: Opus 5.5, Gemini 4 Argon', () => {
-  const { displayModelLabel } = require('../dist/providers/model-label');
+test('model labels read like each app: Opus 5.5, Gemini 4 Argon, GPT-6.1 Sol', (t) => {
+  const { displayModelLabel, resetModelLabelCacheForTests } = require('../dist/providers/model-label');
+  const codexHome = tempDir(t, 'dcs-label-codex-');
+  const grokHome = tempDir(t, 'dcs-label-grok-');
+  withEnv(t, 'CODEX_HOME', codexHome);
+  withEnv(t, 'DISCORD_CODING_STATUS_GROK_HOME', grokHome);
+  resetModelLabelCacheForTests();
+  t.after(() => resetModelLabelCacheForTests());
+  fs.writeFileSync(path.join(codexHome, 'models_cache.json'), JSON.stringify([
+    { slug: 'gpt-6.1-sol', display_name: 'GPT-6.1-Sol' },
+    { slug: 'gpt-6.1-terra', display_name: 'GPT-6.1 Terra' }
+  ]));
+  fs.writeFileSync(path.join(grokHome, 'models_cache.json'), JSON.stringify({
+    models: { 'grok-4.7': { info: { id: 'grok-4.7', name: 'Grok 4.7' } } }
+  }));
+  const app = { family: 'codex', providerId: 'codexApp' };
+  const cli = { family: 'codex', providerId: 'codexCli' };
+  assert.equal(displayModelLabel(app, 'gpt-6.1-sol'), 'GPT-6.1 Sol');
+  assert.equal(displayModelLabel(cli, 'gpt-6.1-sol'), 'GPT-6.1-Sol');
+  assert.equal(displayModelLabel(app, 'gpt-6.1-terra'), 'GPT-6.1 Terra');
+  assert.equal(displayModelLabel(app, 'gpt-7-nova'), 'gpt-7-nova', 'a slug missing from the Codex list is never guessed');
+  assert.equal(displayModelLabel({ family: 'grok' }, 'grok-4.7'), 'Grok 4.7');
+  assert.equal(displayModelLabel({ family: 'grok' }, 'grok-unknown'), 'grok-unknown');
   const cases = [
     ['claude', 'claude-opus-5-5', 'Opus 5.5'],
     ['claude', 'claude-opus-5-5[1m]', 'Opus 5.5'],
@@ -224,9 +245,11 @@ test('model labels read like each app: Opus 5.5, Gemini 4 Argon', () => {
     ['antigravity', 'claude-opus-5-5-high', 'Claude Opus 5.5'],
     ['antigravity', 'claude-sonnet-5-5-medium', 'Claude Sonnet 5.5'],
     ['antigravity', 'claude-opus-4-6-thinking', 'Claude Opus 4.6'],
-    ['antigravity', 'gpt-oss-120b-medium', 'GPT OSS 120B'],
-    ['codex', 'gpt-6.1-sol', 'gpt-6.1-sol'],
-    ['muse', 'muse-spark-1.3-contributor', 'muse-spark-1.3-contributor']
+    ['antigravity', 'gpt-oss-120b-medium', 'GPT-OSS 120B'],
+    ['antigravity', 'Gemini 4 Argon (Medium)', 'Gemini 4 Argon'],
+    ['antigravity', 'GPT-OSS 120B (Medium)', 'GPT-OSS 120B'],
+    ['muse', 'muse-spark-1.3-contributor', 'Muse Spark 1.3'],
+    ['muse', 'meta.muse-spark-1.3', 'Muse Spark 1.3']
   ];
   for (const [family, id, expected] of cases) {
     assert.equal(displayModelLabel(family, id), expected, `${family} ${id}`);
@@ -243,4 +266,49 @@ test('Antigravity publishes the app label for a learned placeholder', async (t) 
     key: 'state:ag', providerId: 'antigravityApp', family: 'antigravity', source: 'hook', model: null, details: '', state: ''
   });
   assert.equal(enriched.details, 'Model: Gemini 4 Argon');
+});
+
+test('the app wins over its CLI unless the CLI is in front', () => {
+  const now = Date.now();
+  const cliHook = { key: 'state:cc', family: 'claude', providerId: 'claudeCode', source: 'hook', updatedAt: now };
+  const desktop = { key: 'process:desktop', family: 'claude', providerId: 'claudeApp', source: 'process', updatedAt: now - 1000 };
+  assert.equal(selectNewestTool([cliHook, desktop])?.key, 'process:desktop');
+  assert.equal(selectNewestTool([cliHook, desktop], 'claude')?.key, 'process:desktop');
+  assert.equal(selectNewestTool([cliHook, desktop], 'claude', 'app')?.key, 'process:desktop');
+  assert.equal(selectNewestTool([cliHook, desktop], 'claude', 'cli')?.key, 'state:cc');
+  const codexCli = { key: 'state:cx', family: 'codex', providerId: 'codexCli', source: 'hook', updatedAt: now };
+  const codexApp = { key: 'process:cxapp', family: 'codex', providerId: 'codexApp', source: 'process', updatedAt: now };
+  assert.equal(selectNewestTool([codexCli, codexApp], 'codex')?.key, 'process:cxapp');
+  assert.equal(selectNewestTool([codexCli, codexApp], 'codex', 'cli')?.key, 'state:cx');
+});
+
+test('Antigravity CLI (agy) shows the model agy applied, like `agy models` lists it', async (t) => {
+  const { isAntigravityCliProcess, isAntigravityProcess } = require('../dist/core/detection/tool-detection');
+  const agyExe = 'C:/Users/u/AppData/Local/agy/bin/agy.exe';
+  assert.equal(isAntigravityCliProcess({ executablePath: agyExe }), true);
+  assert.equal(isAntigravityProcess({ executablePath: agyExe }), false);
+
+  const cliHome = tempDir(t, 'dcs-fix-agy-');
+  withEnv(t, 'DISCORD_CODING_STATUS_ANTIGRAVITY_CLI_HOME', cliHome);
+  fs.writeFileSync(path.join(cliHome, 'settings.json'), JSON.stringify({ model: 'Gemini 3.5 Flash (High)' }));
+  const tool = {
+    key: 'process:agy', providerId: 'antigravityCli', family: 'antigravity', source: 'process', model: null, details: '', state: ''
+  };
+  assert.equal((await enrichToolForPresence(tool)).details, 'Model: Gemini 3.5 Flash', 'settings.json is the fallback');
+
+  fs.writeFileSync(path.join(cliHome, 'cli.log'), [
+    'I1103 01:48:26.185943 1 model_resolver.go:155] model alias "Gemini 3.5 Flash (High)" resolved to "Gemini 4 Argon (Medium)"',
+    'I1103 01:48:26.188029 1 model_config_manager.go:340] Propagating selected model override to backend: label="Gemini 4 Argon (Medium)"',
+    'I1103 01:49:02.000000 1 model_config_manager.go:340] Propagating selected model override to backend: label="Claude Sonnet 5.5 (High)"',
+    ''
+  ].join('\n'));
+  assert.equal((await enrichToolForPresence(tool)).details, 'Model: Claude Sonnet 5.5', 'the last applied label wins');
+});
+
+test('the Antigravity app outranks agy unless a terminal is in front', () => {
+  const now = Date.now();
+  const app = { key: 'process:ag', family: 'antigravity', providerId: 'antigravityApp', source: 'process', updatedAt: now };
+  const cli = { key: 'process:agy', family: 'antigravity', providerId: 'antigravityCli', source: 'process', updatedAt: now };
+  assert.equal(selectNewestTool([cli, app], 'antigravity')?.key, 'process:ag');
+  assert.equal(selectNewestTool([cli, app], 'antigravity', 'cli')?.key, 'process:agy');
 });

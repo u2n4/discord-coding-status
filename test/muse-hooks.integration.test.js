@@ -889,7 +889,7 @@ test('muse model events update Discord fast on the same session; SessionEnd clea
   );
   await waitFor(
     () => readRpcEvents(rpcLogFile).find(
-      (event) => event.method === 'setActivity' && event.activity.details === 'Model: muse-spark-1.2'
+      (event) => event.method === 'setActivity' && event.activity.details === 'Model: Muse Spark 1.2'
     ),
     'the SessionStart model to reach Discord RPC'
   );
@@ -902,7 +902,7 @@ test('muse model events update Discord fast on the same session; SessionEnd clea
   );
   await waitFor(
     () => readRpcEvents(rpcLogFile).find(
-      (event) => event.method === 'setActivity' && event.activity.details === 'Model: muse-spark-1.3'
+      (event) => event.method === 'setActivity' && event.activity.details === 'Model: Muse Spark 1.3'
     ),
     'the same-session model switch to reach Discord RPC without a new focus event'
   );
