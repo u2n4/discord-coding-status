@@ -52,10 +52,15 @@ export function watchSelectedModelFile(file: string | null, onChange: () => void
   unwatchSelectedModelFile();
 
   try {
-    const next = fs.watch(file, () => {
+    const next = fs.watch(file, (eventType) => {
       clearDebounce();
       debounceTimer = setTimeout(() => {
         debounceTimer = null;
+        if (eventType === 'rename' && watchedFile === file && changeCallback) {
+          const cb = changeCallback;
+          unwatchSelectedModelFile();
+          watchSelectedModelFile(file, cb);
+        }
         try {
           changeCallback?.();
         } catch (_) {

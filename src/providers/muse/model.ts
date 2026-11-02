@@ -463,3 +463,67 @@ export function readMuseExecModelForProcess(process: ProcessInfo): MuseModelResu
 export function readActiveMuseModel(_freshAfterMs: number): MuseModelResult | null {
   return null;
 }
+
+export interface MuseSettingsModelResult {
+  model: string;
+  filePath: string;
+  mtimeMs: number;
+}
+
+export function getMuseSettingsFilePath(): string {
+  const override = String(process.env.DISCORD_CODING_STATUS_MUSE_SETTINGS_FILE || '').trim();
+  if (override) {
+    return path.resolve(override);
+  }
+
+  const xdgConfig = String(process.env.XDG_CONFIG_HOME || '').trim()
+    || path.join(os.homedir(), '.config');
+  return path.join(xdgConfig, 'muse', 'settings.json');
+}
+
+const museSettingsCache = new Map<string, { mtimeMs: number; model: string | null }>();
+
+export function readMuseSettingsModel(): MuseSettingsModelResult | null {
+  const filePath = getMuseSettingsFilePath();
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (_) {
+    museSettingsCache.delete(filePath);
+    return null;
+  }
+  if (!stat.isFile()) {
+    return null;
+  }
+
+  const cached = museSettingsCache.get(filePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs) {
+    return cached.model ? { model: cached.model, filePath, mtimeMs: stat.mtimeMs } : null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (_) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    museSettingsCache.set(filePath, { mtimeMs: stat.mtimeMs, model: null });
+    return null;
+  }
+
+  const record = parsed as Record<string, unknown>;
+  const raw = typeof record.model === 'string' ? record.model.trim() : '';
+  if (!raw || raw.toLowerCase() === 'unknown' || raw.toLowerCase() === 'same-as-main') {
+    museSettingsCache.set(filePath, { mtimeMs: stat.mtimeMs, model: null });
+    return null;
+  }
+
+  museSettingsCache.set(filePath, { mtimeMs: stat.mtimeMs, model: raw });
+  return {
+    model: raw,
+    filePath,
+    mtimeMs: stat.mtimeMs
+  };
+}
+

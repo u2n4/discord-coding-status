@@ -29,6 +29,7 @@ export interface SetupCommandContext {
   writeSetupConfig: (args: Record<string, string | boolean>) => void;
   copyRuntime: () => string;
   installStartup: (scriptPath: string, startNow: boolean) => string;
+
   installers: readonly HookInstaller[];
   isOpencodePluginInstalled: () => boolean;
   isPiExtensionInstalled: () => boolean;

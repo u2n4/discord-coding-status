@@ -208,6 +208,18 @@ export function isCursorProcess(value: ProcessDescriptor | string): boolean {
       && /(?:^|[\s/])(?:cursor)(?:[/.][^\s]*)?(?:\s|$)/.test(text);
 }
 
+/**
+ * Exact Muse binary basename match (no command-line guessing): the `muse`
+ * launcher plus versioned `muse-bin-*` executables. Decoys such as
+ * `amuse.exe` or `museum` never match.
+ */
+export function isMuseBinaryBasename(value: string): boolean {
+  const basename = value.trim().toLowerCase();
+  return basename === 'muse'
+    || basename === 'muse.exe'
+    || /^muse-bin-[\w.+-]+(?:\.exe)?$/.test(basename);
+}
+
 export function isMuseProcess(value: ProcessDescriptor | string): boolean {
   const text = normalizedProcessText(value).replace(/\\/g, '/');
   const executable = executableBasename(value);
@@ -220,4 +232,26 @@ export function isMuseProcess(value: ProcessDescriptor | string): boolean {
 
   return /(?:^|[\s/])muse-bin-[\w.+-]+(?:\.exe)?(?:\s|$)/.test(text)
     || /(?:^|[\s/])muse(?:\.exe|\.cmd)?(?:\s|$)/.test(text);
+}
+
+export function isAntigravityProcess(value: ProcessDescriptor | string): boolean {
+  const text = normalizedProcessText(value).replace(/\\/g, '/');
+  if (
+    /(?:^|\s)--type=(?:gpu-process|utility|renderer|crashpad-handler|zygote)(?:\s|$)/.test(text)
+    || text.includes('--import=')
+    || text.includes('--ms-enable-electron-run-as-node')
+    || text.includes('sidecar')
+    || text.includes('bootstrap-fork')
+    || /\.(?:cjs|mjs|js)(?:\s|"|$)/.test(text)
+  ) {
+    return false;
+  }
+
+  const executable = executableBasename(value);
+  if (executable === 'antigravity' || executable === 'antigravity.exe') {
+    return true;
+  }
+
+  return text.includes('/antigravity.app/contents/macos/antigravity')
+    || (text.includes('/antigravity/') && /(?:^|[\s/])antigravity(?:\.exe)?(?:\s|$)/.test(text));
 }

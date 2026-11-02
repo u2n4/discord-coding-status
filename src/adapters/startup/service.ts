@@ -196,6 +196,15 @@ export function writeWindowsHiddenLauncher(
   return vbsPath;
 }
 
+/**
+ * Bound for the elevated `schtasks /Create` retry. `Start-Process -Wait`
+ * blocks until the UAC prompt is answered, which never happens in a
+ * non-interactive session; without a timeout a denied-or-absent click hangs
+ * setup forever with the daemon already stopped. 120s still leaves an
+ * interactive user ample time to approve.
+ */
+const ELEVATED_TASK_CREATE_TIMEOUT_MS = 120_000;
+
 export function installWindowsScheduledTask(
   scriptPath: string,
   startNow: boolean,
@@ -229,7 +238,7 @@ export function installWindowsScheduledTask(
         'Bypass',
         '-Command',
         `Start-Process -FilePath schtasks -ArgumentList '${argumentList}' -Verb RunAs -Wait`
-      ], { stdio: ['ignore', 'ignore', 'pipe'] });
+      ], { stdio: ['ignore', 'ignore', 'pipe'], timeout: ELEVATED_TASK_CREATE_TIMEOUT_MS });
     } catch (elevationError) {
       const elevationDetail = (elevationError && typeof elevationError === 'object' && 'stderr' in elevationError)
         ? String((elevationError as { stderr?: Buffer | string }).stderr || '').trim()
@@ -237,7 +246,8 @@ export function installWindowsScheduledTask(
       throw new Error(
         `Failed to create the scheduled task (${detail || 'Access is denied'}. `
         + `Run setup from an Administrator terminal, or accept the UAC prompt.`
-        + `${elevationDetail ? ` Elevated attempt failed: ${elevationDetail}` : ''})`
+        + `${elevationDetail ? ` Elevated attempt failed: ${elevationDetail}` : ''}`
+        + `${(elevationError as { code?: string }).code === 'ETIMEDOUT' ? ' Elevated attempt timed out waiting for the UAC prompt.' : ''})`
       );
     }
   }

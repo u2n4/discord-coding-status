@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ProcessInfo, ToolFamily } from '../../core/tools/types';
 import type { ToolProvider } from '../../core/providers/types';
+import { isMuseProcess } from '../../core/detection/tool-detection';
 
 const execFileAsync = promisify(execFile);
 const FOREGROUND_TIMEOUT_MS = 5_000;
@@ -97,10 +98,62 @@ export function familyForForegroundProcess(
   while (queue.length > 0) {
     const { process, depth } = queue.shift() as { process: ProcessInfo; depth: number };
 
+    let matchedAtNode = false;
     for (const provider of providers) {
       if (provider.process && provider.presence && provider.process.matches(process)) {
         families.add(provider.family);
+        matchedAtNode = true;
       }
+    }
+
+    if (!matchedAtNode && depth < MAX_DESCENDANT_DEPTH) {
+      for (const child of children.get(process.pid) || []) {
+        queue.push({ process: child, depth: depth + 1 });
+      }
+    }
+  }
+
+  return families.size === 1 ? [...families][0] : null;
+}
+
+/**
+ * Finds the ONE Muse process owned by the foreground window: the foreground
+ * PID itself or a descendant (terminal -> shell -> agent, same depth bound as
+ * family attribution). Returns null when the foreground hosts zero or
+ * several Muse processes (shared terminal panes/siblings are ambiguous, never
+ * resolved by newest-descendant heuristics) or when the PID is unknown.
+ */
+export function musePidForForegroundProcess(
+  foregroundPid: number,
+  processes: readonly ProcessInfo[],
+  matches: (process: ProcessInfo | string) => boolean = isMuseProcess
+): number | null {
+  const byPid = new Map<number, ProcessInfo>();
+  for (const process of processes) {
+    byPid.set(process.pid, process);
+  }
+
+  const root = byPid.get(foregroundPid);
+  if (!root) {
+    return null;
+  }
+
+  const children = childrenByParent(processes);
+  const queue: Array<{ process: ProcessInfo; depth: number }> = [{ process: root, depth: 0 }];
+  const found = new Set<number>();
+
+  while (queue.length > 0) {
+    const { process, depth } = queue.shift() as { process: ProcessInfo; depth: number };
+
+    try {
+      if (matches(process)) {
+        found.add(process.pid);
+        if (found.size > 1) {
+          return null;
+        }
+      }
+    } catch (_) {
+      return null;
     }
 
     if (depth < MAX_DESCENDANT_DEPTH) {
@@ -110,5 +163,5 @@ export function familyForForegroundProcess(
     }
   }
 
-  return families.size === 1 ? [...families][0] : null;
+  return found.size === 1 ? [...found][0] : null;
 }

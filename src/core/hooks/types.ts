@@ -16,6 +16,13 @@ export interface HookSessionState {
   effort?: string;
   context?: string;
   claude_quota_eligible?: boolean;
+  /**
+   * Native Muse hook binding: PID + creation time (Unix ms) of the owning
+   * Muse process, derived from the receiver's own ancestor chain. Absent on
+   * manual/unbound sessions; a dead PID or creation mismatch invalidates.
+   */
+  musePid?: number;
+  museCreatedAtMs?: number;
 }
 
 export interface HookStateFile {

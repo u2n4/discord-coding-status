@@ -5,6 +5,7 @@ import { powershellCommandLine, shellQuoteArg } from './env';
 import { envPathValue, resolveHomePath } from './commands/config/settings';
 import { getArgString } from './commands/args';
 import { findStringDeep, readHookInput } from './state-store';
+import { readGrokSessionSummaryModel } from './providers/grok/model';
 import type { HookSessionState } from './core/hooks/types';
 
 export const GROK_MANAGED_HOOK_MARKER = '--managed-by=discord-coding-status';
@@ -282,7 +283,12 @@ export function resolveGrokModelAndEffort(
   // currently proven (observed hook inputs carry no model; no transcript or
   // session file format with session/PID binding is documented in-repo), so
   // unknown stays app-only rather than fabricating a model.
-  const model: string | null = argModel || inputModel || null;
+  const sessionId = (args ? (getArgString(args, 'session-id') || getArgString(args, 'session_id')) : null)
+    || (input ? findStringDeep(input, ['session_id', 'sessionId']) : null);
+  const cwd = (args ? getArgString(args, 'cwd') : null)
+    || (input ? findStringDeep(input, ['cwd', 'current_working_directory', 'working_directory', 'workspace', 'workspaceRoot']) : null);
+  const summaryModel = sessionId ? readGrokSessionSummaryModel(sessionId, cwd)?.model || null : null;
+  const model: string | null = argModel || inputModel || summaryModel || null;
   const effort: string | null = argEffort || inputEffort || null;
 
   return {

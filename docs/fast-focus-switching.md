@@ -23,6 +23,13 @@ atomic state retry are preserved.
   the entry clears only when its family leaves the alive displayable set, never
   because another hook is newer. Missing-ID families are excluded by the caller
   and can neither be remembered nor blank a configured tool.
+- Muse instance selection (`src/core/selection/muse-instance.ts`): competing
+  Muse hook sessions resolve by positive binding, not newest-hook. The session
+  bound to the Muse PID under the focused console wins; else the retained
+  last-focused instance; else the family stays app-only. Binding-invalid
+  (dead PID / creation mismatch) sessions are excluded, and shared terminal
+  panes fail closed. Reuses the cached process snapshot and foreground PID —
+  no new census.
 - Selected-model watch (`src/adapters/system/selected-model-watch.ts`): watches
   ONLY the currently selected positively bound Muse exec session file so bound
   model switches publish without a new focus event. No global inference; bare

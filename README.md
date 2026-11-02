@@ -6,7 +6,7 @@
 > name (through its Discord application identity) plus one `Model: <id>` line — no activity,
 > project, quota, timestamps, or anything else. `SHOW_*`, detail levels, and activity styles
 > are inert here. Differences from upstream:
-> - **Muse Code support**: process detection plus headless `exec --session-id <UUID>` live model (exact UUID to session log with open-segment, PID, and freshness guards; bare TUI stays application name only).
+> - **Muse Code support**: native lifecycle hooks plus process detection. Hook sessions bind each TUI to its owning Muse process, and only the foreground-associated (or retained) instance shows its model; headless `exec --session-id <UUID>` keeps its exact-UUID live model for hook-less setups, and unbound/ambiguous TUIs stay application name only.
 >   Requires your own Discord application (one-time setup below).
 > - **Fixed detection**: ChatGPT Classic is no longer mistaken for Codex Desktop; headless
 >   `codex exec-server` is no longer mistaken for Codex CLI.
@@ -24,7 +24,7 @@
 <h1 align="center">Discord Coding Status</h1>
 
 <p align="center">
-  Real-time Discord Rich Presence for Codex, Claude Code, Grok Code, OpenCode, Pi, and Cursor.
+  Real-time Discord Rich Presence for Codex, Claude Code, Grok Code, Muse Code, OpenCode, Pi, and Cursor.
 </p>
 
 <p align="center">
@@ -51,8 +51,8 @@ Discord Coding Status is a small local daemon that keeps your Discord activity i
 
 ## Why use it?
 
-- **Real-time updates** - Codex, Claude Code, Grok Code, OpenCode, Pi, and Cursor hook and process changes reach Discord immediately; polling remains as a fallback.
-- **Codex, Claude Code, Grok Code, OpenCode, Pi, and Cursor** - separate Discord application identities are built in for each tool (Muse Code needs your own application; see above).
+- **Real-time updates** - Codex, Claude Code, Grok Code, Muse Code, OpenCode, Pi, and Cursor hook and process changes reach Discord immediately; polling remains as a fallback.
+- **Codex, Claude Code, Grok Code, Muse Code, OpenCode, Pi, and Cursor** - separate Discord application identities are built in for each tool (Muse Code needs your own application; see above).
 - **Minimal display** - Discord shows only the app name plus one raw `Model: <id>` line; activity, project, quota, and everything else stay off Discord.
 - **Quota aware (CLI only)** - the `quota` and `status` commands read Codex quota from OAuth/app-server RPC, Claude subscription quota from Claude Code OAuth, Grok billing quota, OpenCode Go usage, and Cursor dashboard usage; presence itself never shows quota.
 - **Local-first** - session state stays on your machine and Rich Presence uses Discord's local IPC/RPC transport.
@@ -66,6 +66,7 @@ flowchart LR
     H["Codex lifecycle hooks"] --> D["Local daemon"]
     C["Claude lifecycle hooks"] --> D
     G["Grok lifecycle hooks"] --> D
+    M["Muse lifecycle hooks"] --> D
     P["Process detection"] --> D
     D --> S["Sanitize and enrich activity"]
     Q["Codex quota source"] -. optional .-> S
@@ -89,7 +90,7 @@ The state file is watched for immediate changes. A 10-second process/polling loo
 | OpenCode CLI | Process detection | OpenCode Go usage | OpenCode |
 | Pi | Process detection | — | Pi |
 | Cursor IDE / CLI | Process detection | Cursor dashboard usage | Cursor |
-| Muse Code | Process detection (`exec --session-id` live model; bare TUI app-only) | — | Muse Code |
+| Muse Code | Lifecycle hooks + process fallback | — | Muse Code |
 
 If multiple tools are active together, the daemon submits presence only for the tool whose session was updated most recently and clears the others. Discord Desktop can display a single activity per user, so this keeps the harness you are actually using in view instead of a stale background process.
 
@@ -97,7 +98,7 @@ If multiple tools are active together, the daemon submits presence only for the 
 
 - Node.js 18 or newer
 - Discord Desktop, signed in and running
-- Codex CLI, ChatGPT desktop with Codex, Claude Code, Claude Desktop, Grok Code, OpenCode, Pi, or Cursor
+- Codex CLI, ChatGPT desktop with Codex, Claude Code, Claude Desktop, Grok Code, Muse Code, OpenCode, Pi, or Cursor
 - macOS or Windows for automatic startup installation
 
 Linux can run the daemon manually, but `setup` and `uninstall` currently manage startup only on macOS and Windows.
@@ -118,10 +119,10 @@ npx -y discord-coding-status@latest setup
 
 Setup performs four actions:
 
-1. Detects local Codex/ChatGPT, Claude, Grok Code, OpenCode, Pi, and Cursor CLI or desktop installations.
+1. Detects local Codex/ChatGPT, Claude, Grok Code, Muse Code, OpenCode, Pi, and Cursor CLI or desktop installations.
 2. Copies a self-contained runtime into your user application-data directory.
 3. Installs and starts a macOS LaunchAgent or Windows Scheduled Task.
-4. Installs managed Codex hooks when Codex is detected, Claude hooks when Claude Code is detected, and Grok hooks when Grok Code is detected.
+4. Installs managed Codex hooks when Codex is detected, Claude hooks when Claude Code is detected, Grok hooks when Grok Code is detected, and Muse hooks when Muse Code is detected.
 
 Force hook installation if a tool was not detected:
 
@@ -129,6 +130,7 @@ Force hook installation if a tool was not detected:
 npx -y discord-coding-status@latest setup --codex-hooks
 npx -y discord-coding-status@latest setup --claude-hooks
 npx -y discord-coding-status@latest setup --grok-hooks
+npx -y discord-coding-status@latest setup --muse-hooks
 ```
 
 Skip either managed hook set:
@@ -137,6 +139,7 @@ Skip either managed hook set:
 npx -y discord-coding-status@latest setup --no-codex-hooks
 npx -y discord-coding-status@latest setup --no-claude-hooks
 npx -y discord-coding-status@latest setup --no-grok-hooks
+npx -y discord-coding-status@latest setup --no-muse-hooks
 ```
 
 ### 2. Trust Codex hooks
@@ -163,14 +166,14 @@ npx discord-coding-status quota --tool cursor
 npx discord-coding-status quota --tool opencode
 ```
 
-Start a Codex, Claude Code, Grok Code, OpenCode, Pi, or Cursor session, then submit a prompt or use a tool. OpenCode, Pi, and Cursor are detected through their running process; Discord updates within the polling interval (10 seconds by default). Codex, Claude Code, and Grok Code also update immediately through managed lifecycle hooks.
+Start a Codex, Claude Code, Grok Code, Muse Code, OpenCode, Pi, or Cursor session, then submit a prompt or use a tool. OpenCode, Pi, and Cursor are detected through their running process; Discord updates within the polling interval (10 seconds by default). Codex, Claude Code, Grok Code, and Muse Code also update immediately through managed lifecycle hooks. Muse hooks load at session startup, so restart running Muse sessions after installing them.
 
 ### Updating
 
 Run setup from the latest published package to replace the copied runtime, refresh its production dependencies, reload startup, and update the managed hooks:
 
 ```sh
-npx -y discord-coding-status@latest setup --codex-hooks --claude-hooks --grok-hooks
+npx -y discord-coding-status@latest setup --codex-hooks --claude-hooks --grok-hooks --muse-hooks
 ```
 
 Existing user configuration and session state are preserved. If the managed hook commands changed, open Codex and run `/hooks` to review and trust them again.
@@ -415,6 +418,33 @@ npx discord-coding-status hooks uninstall grok
 
 Grok hooks are written to `~/.grok/hooks/discord-coding-status.json` as passive, globally-trusted hooks that report session activity (status, tool, project) to the daemon. They never block the agent and need no manual approval.
 
+## Muse Code hooks
+
+Install, inspect, disable, or remove only the hooks managed by this project:
+
+```sh
+npx discord-coding-status hooks setup muse
+npx discord-coding-status hooks status muse
+npx discord-coding-status hooks uninstall muse
+```
+
+The installer merges five lifecycle events (`SessionStart`, `UserPromptSubmit`,
+`PreLLMCall`, `PostLLMCall`, `SessionEnd`) into the standalone Muse user
+settings (`$XDG_CONFIG_HOME/muse/settings.json`, default
+`~/.config/muse/settings.json`), preserving unrelated settings and hook groups
+and backing the previous file up as `settings.json.bak`. No plugin install or
+trust change is involved; hooks load at session startup, so restart running
+Muse sessions after installing them.
+
+Each hook event reports only its session id and current model, and the
+receiver binds the session to its owning Muse process (PID + creation time
+from its own ancestor chain). When several Muse sessions are alive, only the
+instance hosted by the focused console shows its model; focusing Discord or an
+unrelated window retains that same instance, and shared terminal panes or a
+focused-but-silent TUI stay application name only instead of guessing. A model
+switch on the same session publishes on the next model event with no focus
+change. Prompts, tool data, and transcript content are never read.
+
 ### Generic hook input
 
 Local wrappers can publish exact state for Codex, Claude Code, or another tool:
@@ -444,7 +474,7 @@ Concurrent hook writes use a lock plus atomic file replacement so burst updates 
 
 | Command | Description |
 | --- | --- |
-| `setup` | Install the runtime/startup entry, start the daemon, and auto-install detected Codex, Claude, and Grok hooks. |
+| `setup` | Install the runtime/startup entry, start the daemon, and auto-install detected Codex, Claude, Grok, and Muse hooks. |
 | _(no command)_ | Open the interactive menu. Falls back to this help when stdin/stdout is not a terminal. |
 | `config` | Open the display TUI with a live two-line Discord preview. |
 | `config --advanced` | Edit advanced path, text, and image overrides with prompts. |
@@ -464,6 +494,7 @@ Concurrent hook writes use a lock plus atomic file replacement so burst updates 
 | `hook --tool TOOL ...` | Write or update a local session state. |
 | `codex-hook --event EVENT` | Receive a native Codex lifecycle event. |
 | `claude-hook --event EVENT` | Receive a native Claude lifecycle event. |
+| `muse-hook --event EVENT` | Receive a native Muse lifecycle event. |
 | `state` | Print current sanitized, non-expired session state. |
 | `clear --session-id ID` | Remove one local session. |
 | `--help` / `--version` | Print CLI help or version. |
@@ -478,6 +509,8 @@ Useful setup flags:
 | `--no-claude-hooks` | Skip Claude hook installation. |
 | `--grok-hooks` | Force Grok hook installation. |
 | `--no-grok-hooks` | Skip Grok hook installation. |
+| `--muse-hooks` | Force Muse hook installation. |
+| `--no-muse-hooks` | Skip Muse hook installation. |
 | `--codex-quota-source SOURCE` | Persist the selected quota source during setup. |
 | `--no-start` | Install startup without starting it immediately. |
 | `--dry-run` | Print detected paths and planned actions without installing. |

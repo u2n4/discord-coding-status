@@ -50,6 +50,7 @@ export interface DiscordCapability {
   label: string;
   defaultClientId?: string;
   clientIdEnvironment?: string;
+  defaultImageKey?: string;
   imageKeyEnvironment?: string;
 }
 

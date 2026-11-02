@@ -40,7 +40,7 @@ export function resolveDiscordApplications(
       label: discord.label,
       clientId: readEnvironment(clientIdEnvironment, discord.defaultClientId || '').trim(),
       clientIdEnvironment,
-      imageKey: readEnvironment(imageKeyEnvironment).trim()
+      imageKey: readEnvironment(imageKeyEnvironment, discord.defaultImageKey || '').trim()
     });
   }
 

@@ -39,8 +39,11 @@ import {
   toolProviders
 } from './providers/registry';
 import { discordApplicationForTool } from './providers/discord';
-import { readMuseExecModelForProcess } from './providers/muse/model';
-import type { ActiveTool } from './core/tools/types';
+import { readMuseExecModelForProcess, readMuseSettingsModel } from './providers/muse/model';
+import { readCodexConfiguredModel } from './providers/codex/model';
+import { readGrokDefaultConfigModel, readGrokSessionSummaryModel } from './providers/grok/model';
+import { readActiveAntigravityModel } from './providers/antigravity/model';
+import type { ActiveTool, ProcessInfo } from './core/tools/types';
 import type {
   PackageInfo,
   PresencePayload
@@ -275,6 +278,7 @@ export function toolFromSession(session: HookSessionState): ActiveTool {
       cwd: session.cwd,
       sessionId: session.session_id,
       startedAt: session.started_at || session.updated_at || null,
+      updatedAt: session.updated_at || null,
       status: session.status,
       activity: session.activity || null,
       model: session.model || null,
@@ -299,6 +303,7 @@ export function toolFromSession(session: HookSessionState): ActiveTool {
       cwd: session.cwd,
       sessionId: session.session_id,
       startedAt: session.started_at || session.updated_at || null,
+      updatedAt: session.updated_at || null,
       status: session.status,
       activity: session.activity || null,
       model: session.model || null,
@@ -317,6 +322,7 @@ export function toolFromSession(session: HookSessionState): ActiveTool {
     cwd: session.cwd,
     sessionId: session.session_id,
     startedAt: session.started_at || session.updated_at || null,
+    updatedAt: session.updated_at || null,
     status: session.status,
     activity: session.activity || null,
     model: session.model || null,
@@ -393,6 +399,18 @@ export function detectStateTools(): ActiveTool[] {
 
 export function detectStateTool(): ActiveTool | null {
   return detectStateTools()[0] || null;
+}
+
+/**
+ * Live native/manual Muse hook sessions (freshness- and terminal-filtered,
+ * newest last). The daemon resolves which ONE may display its model via
+ * foreground instance binding; this reader only lists candidates.
+ */
+export function readLiveMuseHookSessions(): HookSessionState[] {
+  const state = cleanupStateSessions(readStateFile(), Date.now());
+  return Object.values(state.sessions)
+    .filter((session) => session.tool.trim().toLowerCase() === 'muse')
+    .sort((left, right) => left.updated_at - right.updated_at);
 }
 
 export function mergeActiveTools(primary: ActiveTool[], fallback: ActiveTool[]): ActiveTool[] {
@@ -485,6 +503,21 @@ function modelTextForPresence(tool: ActiveTool): string | null {
   return model ? truncatePresenceText(model) : null;
 }
 
+function isVerifiedLiveProcess(info: ProcessInfo | undefined): boolean {
+  if (!info || typeof info.pid !== 'number' || info.pid <= 0) {
+    return false;
+  }
+  const exe = typeof info.executablePath === 'string' ? info.executablePath.trim() : '';
+  if (!exe) {
+    return false;
+  }
+  try {
+    return fs.existsSync(exe);
+  } catch (_) {
+    return false;
+  }
+}
+
 export async function enrichToolForPresence(tool: ActiveTool | null): Promise<ActiveTool | null> {
   if (!tool) {
     return null;
@@ -494,23 +527,74 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
   // the tool name ("Playing Codex"), so the only published line is the raw
   // model id. No activity, project, branch, quota, context, package, emoji,
   // session counts, or timestamps are ever sent to Discord.
-  // Model is shown ONLY when positively bound (hook/session tool.model).
-  // Process-detected Codex Desktop stays app-only (rollouts carry no PID). Process Muse shows a model ONLY for positively bound headless exec --session-id processes (UUID command line to exact session log with open-segment, PID, and freshness guards); bare TUI stays app-only.
   let model = modelTextForPresence(tool);
-  if (!model && tool.source === 'process' && tool.family === 'muse' && !tool.processAmbiguous && tool.processInfo) {
-    let resolved: string | null = null;
-    try {
-      resolved = readMuseExecModelForProcess(tool.processInfo)?.model || null;
-    } catch (_) {
-      resolved = null;
+  const updatedAtMs = coerceStateTimestamp(tool.updatedAt) || 0;
+
+  if (tool.family === 'codex') {
+    const configured = readCodexConfiguredModel();
+    if (configured?.model) {
+      if (tool.source === 'hook' && (!model || (updatedAtMs > 0 && configured.mtimeMs > updatedAtMs))) {
+        model = truncatePresenceText(configured.model);
+      } else if (tool.source === 'process' && !model && isVerifiedLiveProcess(tool.processInfo)) {
+        model = truncatePresenceText(configured.model);
+      }
     }
-    if (resolved) {
-      model = truncatePresenceText(resolved);
+  } else if (tool.family === 'grok') {
+    if (tool.sessionId) {
+      const summary = readGrokSessionSummaryModel(tool.sessionId, tool.cwd);
+      if (summary?.model && (!model || (updatedAtMs > 0 && summary.mtimeMs > updatedAtMs))) {
+        model = truncatePresenceText(summary.model);
+      }
+    }
+    if (!model && tool.source === 'process' && isVerifiedLiveProcess(tool.processInfo)) {
+      const configured = readGrokDefaultConfigModel();
+      if (configured?.model) {
+        model = truncatePresenceText(configured.model);
+      }
+    }
+  } else if (tool.family === 'muse') {
+    if (!model && tool.source === 'process' && !tool.processAmbiguous && tool.processInfo) {
+      let resolved: string | null = null;
+      try {
+        resolved = readMuseExecModelForProcess(tool.processInfo)?.model || null;
+      } catch (_) {
+        resolved = null;
+      }
+      if (resolved) {
+        model = truncatePresenceText(resolved);
+      }
+    }
+    const settings = readMuseSettingsModel();
+    if (settings?.model) {
+      if (tool.source === 'hook' && (!model || (updatedAtMs > 0 && settings.mtimeMs > updatedAtMs))) {
+        model = truncatePresenceText(settings.model);
+      } else if (tool.source === 'process' && !model && !tool.processAmbiguous && isVerifiedLiveProcess(tool.processInfo)) {
+        model = truncatePresenceText(settings.model);
+      }
+    }
+  }
+  let nextUpdatedAt = tool.updatedAt;
+  let nextSource = tool.source;
+  if (tool.family === 'antigravity') {
+    const active = readActiveAntigravityModel();
+    if (active?.model) {
+      model = truncatePresenceText(active.model);
+    }
+    if (
+      active
+      && Date.now() - active.mtimeMs <= 15 * 60_000
+      && tool.source === 'process'
+      && isVerifiedLiveProcess(tool.processInfo)
+    ) {
+      nextSource = 'hook';
+      nextUpdatedAt = Math.floor(active.mtimeMs);
     }
   }
 
   return {
     ...tool,
+    ...(nextSource !== tool.source ? { source: nextSource } : {}),
+    ...(nextUpdatedAt !== tool.updatedAt ? { updatedAt: nextUpdatedAt } : {}),
     details: model ? truncatePresenceText(`Model: ${model}`) : '',
     state: ''
   };
@@ -646,6 +730,16 @@ export function selectNewestTool(tools: ActiveTool[], preferredFamily: string | 
     const foreground = ordered.find((tool) => toolFamilyForTool(tool) === preferredFamily);
     if (foreground) {
       return foreground;
+    }
+  }
+
+  if (toolFamilyForTool(ordered[0]) === 'codex') {
+    const topRank = sourceRank(ordered[0]);
+    const claudeTool = ordered.find(
+      (tool) => toolFamilyForTool(tool) === 'claude' && sourceRank(tool) >= topRank
+    );
+    if (claudeTool) {
+      return claudeTool;
     }
   }
 

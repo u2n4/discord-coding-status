@@ -8,6 +8,7 @@ import { isMuseProcess } from '../../core/detection/tool-detection';
 // DISCORD_CODING_STATUS_MUSE_CLIENT_ID (config file or environment). The
 // empty default keeps the daemon running; Muse presence stays off until set.
 export const DEFAULT_MUSE_CLIENT_ID = '';
+export const DEFAULT_MUSE_IMAGE_KEY = 'https://github.com/meta-llama.png';
 
 export const museCliProvider: ToolProvider = {
   id: 'museCli',
@@ -32,11 +33,13 @@ export const museCliProvider: ToolProvider = {
       candidates: ['muse']
     }
   },
+  hooks: ['muse'],
   discord: {
     application: 'muse',
     label: 'Muse Code',
     defaultClientId: DEFAULT_MUSE_CLIENT_ID,
     clientIdEnvironment: 'DISCORD_CODING_STATUS_MUSE_CLIENT_ID',
+
     imageKeyEnvironment: 'DISCORD_CODING_STATUS_MUSE_IMAGE_KEY'
   }
 };

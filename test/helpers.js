@@ -73,7 +73,11 @@ function createTestEnvironment(t, overrides = {}) {
     CODEX_HOME: path.join(directory, '.codex'),
     CLAUDE_CONFIG_DIR: path.join(directory, '.claude'),
     DISCORD_CODING_STATUS_CONFIG_DIR: path.join(directory, 'dcs-config'),
-    DISCORD_CODING_STATUS_GROK_HOOKS_DIR: path.join(directory, 'grok-hooks')
+    DISCORD_CODING_STATUS_GROK_HOOKS_DIR: path.join(directory, 'grok-hooks'),
+    DISCORD_CODING_STATUS_MUSE_SETTINGS_FILE: path.join(directory, 'muse-settings.json'),
+    DISCORD_CODING_STATUS_ANTIGRAVITY_CONFIG_DIR: path.join(directory, 'antigravity-config'),
+    DISCORD_CODING_STATUS_ANTIGRAVITY_HOOKS_FILE: path.join(directory, 'antigravity-config', 'hooks.json'),
+    DISCORD_CODING_STATUS_ANTIGRAVITY_HOME: path.join(directory, 'antigravity-home')
   };
   for (const [key, isolated] of Object.entries(isolation)) {
     if (typeof env[key] === 'string' && env[key] && isTmpPath(env[key])) {

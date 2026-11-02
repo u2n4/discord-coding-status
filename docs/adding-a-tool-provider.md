@@ -60,7 +60,7 @@ Import the provider in `src/providers/registry.ts` and append it to `builtInProv
 
 Each hook capability needs one `HookInstaller` supplying `install`, `uninstall`, and
 `status`. Put the harness-specific logic in a top-level module — `src/codex-hooks.ts`,
-`src/claude-hooks.ts`, and `src/grok-hooks.ts` are the existing examples — then register the
+`src/claude-hooks.ts`, `src/grok-hooks.ts`, and `src/muse-hooks.ts` are the existing examples — then register the
 installer in `src/hook-installers.ts`:
 
 ```ts

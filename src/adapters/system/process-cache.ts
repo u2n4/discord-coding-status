@@ -17,9 +17,13 @@ const execFileAsync = promisify(execFile);
 const TARGETED_TIMEOUT_MS = 2000;
 const TARGETED_MAX_BUFFER = 256 * 1024;
 const REFRESH_DEDUP_TTL_MS = 2000;
+const RETAINED_SUBTREE_TTL_MS = 60_000;
 const MAX_REFRESH_DEPTH = 4;
 const MAX_REFRESH_PROCESSES = 32;
 const MAX_DEDUP_ENTRIES = 128;
+
+const HOST_OR_AI_PROCESS_REGEX =
+  /(?:windowsterminal|openconsole|conhost|pwsh|powershell|cmd\.exe|wt\.exe|wezterm|alacritty|mintty|cursor|code\.exe|claude|codex|chatgpt|grok|antigravity|muse|opencode|pi\.exe|node\.exe|bun\.exe)/i;
 
 let cached: ProcessInfo[] = [];
 let byPid = new Map<number, ProcessInfo>();
@@ -32,6 +36,7 @@ let lastRefreshMs = 0;
 
 const inFlightByPid = new Map<number, Promise<ProcessInfo[]>>();
 const lastAttemptByPid = new Map<number, number>();
+const retainedSubtreeByPid = new Map<number, { processes: ProcessInfo[]; expiresAt: number }>();
 
 export interface ProcessCacheStats {
   size: number;
@@ -52,12 +57,25 @@ export function getCachedProcessByPid(pid: number): ProcessInfo | null {
 }
 
 export function setCachedProcessList(list: ProcessInfo[]): void {
-  cached = list;
-  byPid = new Map<number, ProcessInfo>();
+  const now = Date.now();
+  const nextByPid = new Map<number, ProcessInfo>();
   for (const process of list) {
-    byPid.set(process.pid, process);
+    nextByPid.set(process.pid, process);
   }
-  cacheUpdatedAt = Date.now();
+  for (const [rootPid, entry] of retainedSubtreeByPid) {
+    if (entry.expiresAt <= now) {
+      retainedSubtreeByPid.delete(rootPid);
+      continue;
+    }
+    for (const proc of entry.processes) {
+      if (!nextByPid.has(proc.pid)) {
+        nextByPid.set(proc.pid, proc);
+      }
+    }
+  }
+  cached = [...nextByPid.values()];
+  byPid = nextByPid;
+  cacheUpdatedAt = now;
 }
 
 export function getProcessCacheStats(): ProcessCacheStats {
@@ -76,6 +94,7 @@ export function clearProcessCacheForTests(): void {
   cached = [];
   byPid = new Map<number, ProcessInfo>();
   cacheUpdatedAt = 0;
+  retainedSubtreeByPid.clear();
 }
 
 export function resetProcessCacheStatsForTests(): void {
@@ -85,6 +104,7 @@ export function resetProcessCacheStatsForTests(): void {
   lastRefreshMs = 0;
   inFlightByPid.clear();
   lastAttemptByPid.clear();
+  retainedSubtreeByPid.clear();
 }
 
 function pruneDedupEntries(): void {
@@ -152,7 +172,8 @@ async function querySubtree(rootPid: number): Promise<ProcessInfo[]> {
       }
     }
 
-    let frontier = root.map((process) => Math.floor(process.pid));
+    const canHaveAiDescendants = root.some((proc) => HOST_OR_AI_PROCESS_REGEX.test(proc.line));
+    let frontier = canHaveAiDescendants ? root.map((process) => Math.floor(process.pid)) : [];
     for (let depth = 0; depth < MAX_REFRESH_DEPTH && frontier.length > 0; depth += 1) {
       const limited = frontier.slice(0, 8);
       const filter = limited.map((pid) => `ParentProcessId=${Math.floor(pid)}`).join(' OR ');
@@ -194,13 +215,19 @@ export function refreshProcessForPid(pid: number): Promise<ProcessInfo[]> {
     return Promise.resolve([]);
   }
 
+  const now = Date.now();
+  const retained = retainedSubtreeByPid.get(pid);
+  if (retained && retained.expiresAt > now) {
+    refreshDeduped += 1;
+    return Promise.resolve(retained.processes);
+  }
+
   const inFlight = inFlightByPid.get(pid);
   if (inFlight) {
     refreshDeduped += 1;
     return inFlight;
   }
 
-  const now = Date.now();
   const lastAttempt = lastAttemptByPid.get(pid) || 0;
   if (now - lastAttempt < REFRESH_DEDUP_TTL_MS) {
     refreshDeduped += 1;
@@ -217,6 +244,10 @@ export function refreshProcessForPid(pid: number): Promise<ProcessInfo[]> {
 
   const pending = querySubtree(pid)
     .then((processes) => {
+      retainedSubtreeByPid.set(pid, {
+        processes,
+        expiresAt: Date.now() + RETAINED_SUBTREE_TTL_MS
+      });
       upsertIntoCache(processes);
       return processes;
     })

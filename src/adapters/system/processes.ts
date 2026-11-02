@@ -8,6 +8,21 @@ const execFileAsync = promisify(execFile);
 const PS_TIMEOUT_MS = 5_000;
 const LSOF_TIMEOUT_MS = 2_000;
 
+export function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error
+      ? String((error as { code?: unknown }).code || '')
+      : '';
+    return code === 'EPERM';
+  }
+}
+
 export async function getProcessList(): Promise<ProcessInfo[]> {
   if (process.platform === 'win32') {
     return getWindowsProcessList();
@@ -69,8 +84,9 @@ export function parseWindowsProcessListJson(stdout: string): ProcessInfo[] {
 }
 
 async function getWindowsProcessList(): Promise<ProcessInfo[]> {
+  const filter = "Name='node.exe' OR Name='bun.exe' OR Name='claude.exe' OR Name='codex.exe' OR Name='ChatGPT.exe' OR Name='grok.exe' OR Name='Antigravity.exe' OR Name='Cursor.exe' OR Name='opencode.exe' OR Name='pi.exe' OR Name='pwsh.exe' OR Name='powershell.exe' OR Name='cmd.exe' OR Name='WindowsTerminal.exe' OR Name='conhost.exe' OR Name='OpenConsole.exe' OR Name LIKE 'muse%'";
   const command = [
-    '@(Get-CimInstance Win32_Process |',
+    `@(Get-CimInstance Win32_Process -Filter "${filter}" |`,
     'Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,UserModeTime,KernelModeTime,CreationDate) |',
     'ConvertTo-Json -Compress'
   ].join(' ');
@@ -85,46 +101,7 @@ async function getWindowsProcessList(): Promise<ProcessInfo[]> {
     maxBuffer: 4 * 1024 * 1024
   }) as { stdout: string };
 
-  if (!stdout.trim()) {
-    return [];
-  }
-
-  const parsed = JSON.parse(stdout) as unknown;
-  const rows = Array.isArray(parsed) ? parsed : [parsed];
-
-  return rows
-    .map((row): ProcessInfo | null => {
-      const record = asRecord(row);
-      const pid = extractNumberLike(record?.ProcessId);
-      if (pid === null) {
-        return null;
-      }
-
-      const ppid = extractNumberLike(record?.ParentProcessId);
-
-      const commandLine = extractString(record?.CommandLine);
-      const executablePath = extractString(record?.ExecutablePath);
-      const line = [executablePath, commandLine].filter(Boolean).join(' ');
-
-      if (!line) {
-        return null;
-      }
-
-      const userModeTicks = extractNumberLike(record?.UserModeTime) || 0;
-      const kernelModeTicks = extractNumberLike(record?.KernelModeTime) || 0;
-
-      return {
-        pid,
-        ppid: ppid ?? undefined,
-        line,
-        raw: line,
-        executablePath,
-        commandLine,
-        cpuMs: (userModeTicks + kernelModeTicks) / 10_000,
-        createdAtMs: parseCreationDate(record?.CreationDate)
-      };
-    })
-    .filter((processInfo): processInfo is ProcessInfo => Boolean(processInfo));
+  return parseWindowsProcessListJson(stdout);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

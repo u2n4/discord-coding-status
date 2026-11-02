@@ -9,6 +9,13 @@ import {
   rememberLastFocusedFamily
 } from './core/selection/last-focused';
 import {
+  applyMuseDisplayResolution,
+  getRememberedMuseDisplaySession,
+  isMuseHookBindingLive,
+  rememberMuseDisplaySession,
+  resolveMuseDisplaySession
+} from './core/selection/muse-instance';
+import {
   getProcessList
 } from './adapters/system/processes';
 import {
@@ -44,8 +51,21 @@ import {
   toolProviders
 } from './providers/registry';
 import {
-  readMuseExecModelForProcess
+  readMuseExecModelForProcess,
+  readMuseSettingsModel
 } from './providers/muse/model';
+import {
+  readCodexConfiguredModel
+} from './providers/codex/model';
+import {
+  readGrokDefaultConfigModel,
+  readGrokSessionSummaryModel
+} from './providers/grok/model';
+import {
+  findActiveAntigravityTranscriptFile,
+  getAntigravityStateFile,
+  readActiveAntigravityModel
+} from './providers/antigravity/model';
 import {
   APP_TITLE,
   DETAIL_LEVEL,
@@ -71,6 +91,7 @@ import {
   labelForClientId,
   markShuttingDown,
   mergeActiveTools,
+  readLiveMuseHookSessions,
   rpcConnections,
   selectNewestTool,
   setRpcReadyKick,
@@ -82,7 +103,8 @@ import {
 } from './quota';
 import {
   familyForForegroundProcess,
-  getForegroundPid
+  getForegroundPid,
+  musePidForForegroundProcess
 } from './adapters/system/foreground';
 import {
   debugLog,
@@ -248,17 +270,33 @@ function updateSelectedModelWatch(
     const selected = selectNewestTool(displayable, effectivePreferred);
     let file: string | null = null;
 
-    // Only the positively bound headless exec file is ever watched. Bare TUI,
-    // ambiguous, and unbound tools stay unwatched: no global inference.
-    if (selected
-      && selected.source === 'process'
-      && selected.family === 'muse'
-      && !selected.processAmbiguous
-      && selected.processInfo) {
-      try {
-        file = readMuseExecModelForProcess(selected.processInfo)?.sessionFile || null;
-      } catch (_) {
-        file = null;
+    if (selected) {
+      if (selected.family === 'muse') {
+        if (selected.source === 'process' && !selected.processAmbiguous && selected.processInfo) {
+          try {
+            file = readMuseExecModelForProcess(selected.processInfo)?.sessionFile || null;
+          } catch (_) {
+            file = null;
+          }
+        }
+        if (!file) {
+          file = readMuseSettingsModel()?.filePath || null;
+        }
+      } else if (selected.family === 'codex') {
+        file = readCodexConfiguredModel()?.filePath || null;
+      } else if (selected.family === 'grok') {
+        if (selected.sessionId) {
+          file = readGrokSessionSummaryModel(selected.sessionId, selected.cwd)?.filePath || null;
+        }
+        if (!file) {
+          file = readGrokDefaultConfigModel()?.filePath || null;
+        }
+      } else if (selected.family === 'antigravity') {
+        const stateFile = getAntigravityStateFile();
+        file = (fs.existsSync(stateFile) ? stateFile : null)
+          || findActiveAntigravityTranscriptFile()
+          || readActiveAntigravityModel()?.filePath
+          || null;
       }
     }
 
@@ -305,7 +343,7 @@ function getVerifiedDesktopModelForDisplay(): string | null {
   if (!cached) {
     return null;
   }
-  if (!Number.isFinite(cached.updatedAt) || Date.now() - cached.updatedAt > STATE_MAX_AGE_MS) {
+  if (!Number.isFinite(cached.updatedAt)) {
     return null;
   }
   if (!claudeDesktopProviderMatchesPid(cached.pid)) {
@@ -372,8 +410,11 @@ function ensureClaudeDesktopModelTracker(expectedPid: number | null): void {
         return;
       }
       if (event.kind === 'unavailable') {
-        // Foreground matches but the selector failed: fail closed to
-        // app-only (clear stale) and republish without the model.
+        const currentVerified = getVerifiedClaudeDesktopModel();
+        if (currentVerified && currentVerified.pid === expectedPid && claudeDesktopProviderMatchesPid(expectedPid)) {
+          debugLog('Claude Desktop model button temporarily unavailable (e.g. Settings view); retaining verified model for live PID.');
+          return;
+        }
         clearVerifiedClaudeDesktopModel();
         debugLog('Claude Desktop model unavailable; failing closed to app-only.');
         requestFastUpdate('desktop-model-unavailable');
@@ -433,8 +474,9 @@ async function runFastPass(generation: number): Promise<void> {
   // Hook-only mode (PROCESS_DETECTION=off) has no PID attribution: skip the
   // watcher/oneshot census entirely so hook tests stay deterministic and never
   // inherit the real user foreground; newest-hook wins when no AI focus exists.
+  let competingForegroundPid: number | null | undefined = undefined;
   let currentForegroundFamily: string | null = null;
-  if (PROCESS_DETECTION_ENABLED && displayable.length >= 2) {
+  if (PROCESS_DETECTION_ENABLED && displayable.length >= 1) {
     let foregroundPid = getWatcherForegroundPid();
 
     if (foregroundPid === undefined) {
@@ -447,6 +489,7 @@ async function runFastPass(generation: number): Promise<void> {
       }
     }
 
+    competingForegroundPid = typeof foregroundPid === 'number' || foregroundPid === null ? foregroundPid : undefined;
     if (typeof foregroundPid === 'number' && foregroundPid > 0) {
       if (!getCachedProcessByPid(foregroundPid)) {
         try {
@@ -466,6 +509,37 @@ async function runFastPass(generation: number): Promise<void> {
 
   const effectivePreferred = rememberLastFocusedFamily(currentForegroundFamily, aliveFamilies);
 
+  // Native Muse instance selection (pre-enrich): when several Muse hook
+  // sessions compete, only the foreground-associated or retained instance may
+  // show its model; otherwise the family stays app-only. Reuses the competing
+  // pass foreground PID when available, else the watcher/oneshot fallback
+  // with a targeted cache refresh — never a full census.
+  let museResolvedTools = merged;
+  if (merged.some((tool) => toolFamilyForTool(tool) === 'muse')) {
+    const museSessions = readLiveMuseHookSessions();
+    const museForegroundPid = competingForegroundPid;
+    let foregroundMusePid: number | null = null;
+    if (PROCESS_DETECTION_ENABLED && typeof museForegroundPid === 'number' && museForegroundPid > 0) {
+      foregroundMusePid = musePidForForegroundProcess(museForegroundPid, getCachedProcessList());
+    }
+    const museProcesses = getCachedProcessList();
+    const museResolution = resolveMuseDisplaySession({
+      sessions: museSessions,
+      isBindingLive: (binding) => isMuseHookBindingLive(binding, museProcesses),
+      foregroundMusePid,
+      rememberedSessionId: getRememberedMuseDisplaySession()
+    });
+    rememberMuseDisplaySession(
+      museResolution.kind === 'session' && museResolution.via === 'foreground'
+        ? museResolution.session.session_id
+        : null,
+      museResolution.liveSessionIds
+    );
+    museResolvedTools = applyMuseDisplayResolution(merged, museResolution);
+  } else {
+    rememberMuseDisplaySession(null, []);
+  }
+
   // A newer event arrived while this pass was working: abort before any RPC
   // write so stale A is never republished after B. The queued pass reruns
   // with the latest focus/state.
@@ -474,37 +548,19 @@ async function runFastPass(generation: number): Promise<void> {
     return;
   }
 
-  // Narrow Claude Desktop binding: resolve the foreground PID for Desktop
-  // model tracking even when a single tool is displayable (the competing
-  // block above is skipped then). Reuses the watcher/oneshot cache; never a
-  // second persistent helper and never a per-tick census.
+  // Narrow Claude Desktop binding: reuse the already-resolved foreground PID
+  // and family from above — never a second persistent helper and never a
+  // redundant per-tick census.
   let desktopOverride: ClaudeDesktopDisplayOverride = null;
   const claudeDisplayable = displayable.some((tool) => toolFamilyForTool(tool) === 'claude');
   if (PROCESS_DETECTION_ENABLED && claudeDisplayable) {
-    let desktopFgPid = getWatcherForegroundPid();
-    if (desktopFgPid === undefined) {
-      try {
-        desktopFgPid = await getForegroundPid();
-      } catch (_) {
-        desktopFgPid = null;
-      }
-    }
-    let desktopFgFamily: string | null = null;
-    if (typeof desktopFgPid === 'number' && desktopFgPid > 0) {
-      if (!getCachedProcessByPid(desktopFgPid)) {
-        try {
-          await refreshProcessForPid(desktopFgPid);
-        } catch (error) {
-          debugLog(`Desktop foreground refresh failed for ${desktopFgPid}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      desktopFgFamily = familyForForegroundProcess(desktopFgPid, getCachedProcessList(), toolProviders);
-    }
+    const desktopFgPid = competingForegroundPid;
+    const desktopFgFamily = currentForegroundFamily;
     const desktopFgIsDesktop = typeof desktopFgPid === 'number' && desktopFgPid > 0 && claudeDesktopProviderMatchesPid(desktopFgPid);
     if (desktopFgIsDesktop && typeof desktopFgPid === 'number') {
       ensureClaudeDesktopModelTracker(desktopFgPid);
       const verified = getVerifiedDesktopModelForDisplay();
-      if (verified && getVerifiedClaudeDesktopModel()?.pid === desktopFgPid) {
+      if (verified) {
         desktopOverride = { kind: 'model', model: verified };
       } else {
         // Desktop foreground without a verified model: fail closed to
@@ -538,7 +594,7 @@ async function runFastPass(generation: number): Promise<void> {
     ensureClaudeDesktopModelTracker(null);
   }
 
-  const activeTools = await enrichToolsForPresence(merged);
+  const activeTools = await enrichToolsForPresence(museResolvedTools);
 
   if (fastQueued && !shuttingDown) {
     debugLog(`Fast pass ${generation} aborted before publish (newer event queued).`);

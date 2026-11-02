@@ -487,7 +487,7 @@ export function findCodexAncestorPid(startPid = process.ppid): number {
 
   for (let depth = 0; depth < 8; depth += 1) {
     try {
-      const output = execFileSyncString('ps', ['-p', String(currentPid), '-o', 'ppid=,comm=,args=']);
+      const output = process.platform === 'win32' ? '' : execFileSyncString('ps', ['-p', String(currentPid), '-o', 'ppid=,comm=,args=']);
       const line = output.trim();
       const match = line.match(/^(\d+)\s+(.+)$/);
       if (!match) {
@@ -531,7 +531,7 @@ export function isGrokProcessAncestry(startPid = process.ppid): boolean {
 
   for (let depth = 0; depth < 8; depth += 1) {
     try {
-      const output = execFileSyncString('ps', ['-p', String(currentPid), '-o', 'ppid=,comm=,args=']);
+      const output = process.platform === 'win32' ? '' : execFileSyncString('ps', ['-p', String(currentPid), '-o', 'ppid=,comm=,args=']);
       const line = output.trim();
       const match = line.match(/^(\d+)\s+(.+)$/);
       if (!match) {
@@ -605,6 +605,8 @@ export function coerceHookSessionState(value: unknown): HookSessionState | null 
     model: typeof input.model === 'string' ? input.model : undefined,
     effort: typeof input.effort === 'string' ? input.effort : undefined,
     context: typeof input.context === 'string' ? input.context : undefined,
+    musePid: typeof input.musePid === 'number' && Number.isInteger(input.musePid) && input.musePid > 0 ? input.musePid : undefined,
+    museCreatedAtMs: typeof input.museCreatedAtMs === 'number' && Number.isFinite(input.museCreatedAtMs) && input.museCreatedAtMs > 0 ? input.museCreatedAtMs : undefined,
     claude_quota_eligible: typeof input.claude_quota_eligible === 'boolean'
       ? input.claude_quota_eligible
       : undefined
@@ -773,6 +775,9 @@ export function statusFromCodexHookEvent(event: string): string {
 }
 
 export function isSameLogicalSession(left: HookSessionState, right: HookSessionState): boolean {
+  if (left.tool === 'muse' || right.tool === 'muse') {
+    return left.session_id === right.session_id;
+  }
   return (
     left.tool === right.tool &&
     left.surface === right.surface &&

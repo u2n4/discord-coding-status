@@ -13,6 +13,8 @@ export interface StateCommandContext {
   getCodexSession: (args: Record<string, string | boolean>) => HookSessionState;
   getClaudeSession: (args: Record<string, string | boolean>) => HookSessionState;
   getGrokSession: (args: Record<string, string | boolean>) => HookSessionState;
+  getMuseSession: (args: Record<string, string | boolean>) => HookSessionState;
+  getAntigravitySession?: (args: Record<string, string | boolean>) => HookSessionState | null;
   getGenericSession: (args: Record<string, string | boolean>) => HookSessionState | null;
   isGrokAncestry: () => boolean;
 }
@@ -22,7 +24,7 @@ export function runStateCommand(
   args: Record<string, string | boolean>,
   context: StateCommandContext
 ): boolean {
-  if (!['hook', 'codex-hook', 'claude-hook', 'grok-hook', 'clear', 'state'].includes(command)) {
+  if (!['hook', 'codex-hook', 'claude-hook', 'grok-hook', 'muse-hook', 'antigravity-hook', 'clear', 'state'].includes(command)) {
     return false;
   }
 
@@ -58,6 +60,21 @@ export function runStateCommand(
   if (command === 'grok-hook') {
     const session = context.getGrokSession(args);
     context.upsertState(session);
+    return true;
+  }
+
+  if (command === 'muse-hook') {
+    const session = context.getMuseSession(args);
+    context.upsertState(session);
+    return true;
+  }
+
+  if (command === 'antigravity-hook') {
+    const session = context.getAntigravitySession ? context.getAntigravitySession(args) : null;
+    if (session) {
+      context.upsertState(session);
+    }
+    process.stdout.write('{}\n');
     return true;
   }
 

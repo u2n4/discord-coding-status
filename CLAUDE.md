@@ -24,13 +24,13 @@ prettified); unknown model = application name only.
 | Codex Desktop app | ChatGPT.exe in `OpenAI.Codex_*` (Classic excluded) | None — app-only (rollouts carry no PID; hook model only if Desktop ever fires one) |
 | Claude Code | Lifecycle hooks + process | Hook input / transcript tail |
 | Claude Desktop app | Claude.exe foreground window/process/package + UI Automation | Model selector button first text child (positive HWND/PID binding; Menu/ambiguous/missing fail closed to app-only); background CLI hook never overrides |
-| Muse Code | `muse` / `muse-bin-*.exe` process | Headless `exec --session-id <UUID>` only (UUID command line to exact session log with open-segment, PID, freshness guards); bare TUI stays app-only (no PID binding); explicit hook `--model` still wins |
+| Muse Code | Lifecycle hooks + process | Hook input `model` per bound session (receiver ancestor PID+creation binding; foreground-associated or retained instance wins, ambiguity fails app-only); headless `exec --session-id <UUID>` keeps its guarded process model; explicit hook `--model` still wins |
 | Grok Code | Lifecycle hooks + process | Hook input explicit model only (cache first-key + config/fork guesses removed; unbound stays app-only) |
 | OpenCode / Cursor / Pi | Process only | None (application name only) |
 
 Selection: hook sessions outrank process detection; the Windows foreground
 window (including terminal descendants) outranks everything when several
-displayable tools compete. Tools without a Discord application ID are
+displayable tools compete. Within Muse, competing hook sessions resolve by positive instance binding: the session bound to the Muse PID under the focused console wins, else the retained last-focused instance, else app-only (never newest-hook). Tools without a Discord application ID are
 excluded from selection so they can never blank a configured tool.
 
 ## Runtime layout on this machine
@@ -63,3 +63,5 @@ instance (lock at `<stateFile>.daemon.lock`, stale-PID takeover).
 - [2026-10-27] When hook writes fail with EPERM rename on Windows, retry EPERM/EACCES with backoff and rethrow: scanners and racers transiently lock the destination; never suppress or weaken atomicity. (ctx: discord-coding-status)
 - [2026-10-27] When a session-file model has no PID binding (Muse/Codex Desktop), fail closed to app-only on disagreement between fresh files; never show the newest file's model as fact. (ctx: discord-coding-status)
 - [2026-10-27] When attributing a model to Codex Desktop/Muse, require positive binding to the live session/hook/process: consensus among fresh files is NOT evidence, and one lone fresh file mislabels just as easily. Disable unbound scans; app-only when unproven. (ctx: discord-coding-status)
+- [2026-10-27] When writing Muse hook commands for Windows, use plain double-quoted cmd-compatible args: Muse dispatches hooks via cmd.exe (proven receiver ancestry node <- cmd <- muse-bin), so a PowerShell call operator fails to parse. (ctx: discord-coding-status)
+- [2026-10-27] When several Muse hook sessions compete, resolve by positive foreground-instance binding (bound PID under the focused console, else retained instance, else app-only); newest-hook-wins lets a background worker steal the human TUI. (ctx: discord-coding-status)

@@ -22,6 +22,23 @@ import {
   installManagedGrokHooks,
   removeManagedGrokHooks
 } from './grok-hooks';
+import {
+  MUSE_HOOK_EVENTS,
+  MUSE_SETTINGS_FILE,
+  getManagedMuseHookStatus,
+  installManagedMuseHooks,
+  readMuseSettings,
+  removeManagedMuseHooks,
+  writeMuseSettings
+} from './muse-hooks';
+import {
+  ANTIGRAVITY_HOOKS_DIR,
+  ANTIGRAVITY_HOOKS_FILE,
+  ANTIGRAVITY_HOOK_EVENTS,
+  getManagedAntigravityHookStatus,
+  installManagedAntigravityHooks,
+  removeManagedAntigravityHooks
+} from './antigravity-hooks';
 import { toolProviders } from './providers/registry';
 
 const CLAUDE_HOOK_TIMEOUT_SECONDS = 5;
@@ -107,6 +124,78 @@ export const grokHookInstaller: HookInstaller = {
 };
 
 /**
+ * Native Muse Code lifecycle hooks (standalone user settings).
+ */
+export const museHookInstaller: HookInstaller = {
+  capability: 'muse',
+  label: 'Muse Code',
+  events: MUSE_HOOK_EVENTS,
+  install: (scriptPath) => {
+    const result = installManagedMuseHooks(readMuseSettings(), scriptPath);
+    writeMuseSettings(MUSE_SETTINGS_FILE, result.settings);
+    return {
+      target: MUSE_SETTINGS_FILE,
+      installed: result.installed,
+      removed: result.removed
+    };
+  },
+  uninstall: () => {
+    const result = removeManagedMuseHooks(readMuseSettings());
+    if (result.removed > 0) {
+      writeMuseSettings(MUSE_SETTINGS_FILE, result.settings);
+    }
+    return { target: MUSE_SETTINGS_FILE, removed: result.removed };
+  },
+  status: () => {
+    const status = getManagedMuseHookStatus(readMuseSettings(), MUSE_HOOK_EVENTS);
+    return {
+      target: MUSE_SETTINGS_FILE,
+      targetExists: fs.existsSync(MUSE_SETTINGS_FILE),
+      installed: status.installed,
+      managedCount: status.managedCount,
+      expectedEvents: MUSE_HOOK_EVENTS,
+      missingEvents: status.missingEvents,
+      duplicateEvents: status.duplicateEvents,
+      unexpectedEvents: status.unexpectedEvents,
+      details: { museSettingsFile: MUSE_SETTINGS_FILE, eventCounts: status.eventCounts }
+    };
+  },
+  notes: ['Muse hooks load at session startup; restart running Muse sessions to pick them up.']
+};
+
+export const antigravityHookInstaller: HookInstaller = {
+  capability: 'antigravity',
+  label: 'Antigravity',
+  events: ANTIGRAVITY_HOOK_EVENTS,
+  install: (scriptPath) => {
+    const result = installManagedAntigravityHooks(scriptPath);
+    return { target: result.hooksFile, installed: result.installed, removed: result.removed };
+  },
+  uninstall: () => {
+    const result = removeManagedAntigravityHooks();
+    if (result.removed > 0) {
+      fs.writeFileSync(ANTIGRAVITY_HOOKS_FILE, `${JSON.stringify(result.config, null, 2)}\n`, { mode: 0o600 });
+    }
+    return { target: ANTIGRAVITY_HOOKS_FILE, removed: result.removed };
+  },
+  status: () => {
+    const status = getManagedAntigravityHookStatus();
+    return {
+      target: ANTIGRAVITY_HOOKS_FILE,
+      targetExists: fs.existsSync(ANTIGRAVITY_HOOKS_FILE),
+      installed: status.installed,
+      managedCount: status.managedCount,
+      expectedEvents: ANTIGRAVITY_HOOK_EVENTS,
+      missingEvents: status.missingEvents,
+      duplicateEvents: status.duplicateEvents,
+      unexpectedEvents: status.unexpectedEvents,
+      details: { antigravityHooksDir: ANTIGRAVITY_HOOKS_DIR, eventCounts: status.eventCounts }
+    };
+  },
+  notes: ['Antigravity hooks live in ~/.gemini/config/hooks.json.']
+};
+
+/**
  * One installer per harness. A provider declares `hooks: ['<capability>']`; the
  * matching installer here supplies the behaviour, so the CLI never names a
  * harness directly. Adding a harness means adding its hook module and one line
@@ -120,7 +209,9 @@ export const grokHookInstaller: HookInstaller = {
 const builtInHookInstallers: readonly HookInstaller[] = [
   codexHookInstaller,
   claudeHookInstaller,
-  grokHookInstaller
+  grokHookInstaller,
+  museHookInstaller,
+  antigravityHookInstaller
 ];
 
 export function validateHookInstallers(

@@ -47,6 +47,7 @@ ${pc.bold('Usage:')}
   discord-coding-status codex-hook --event stop
   discord-coding-status claude-hook --event Stop
   discord-coding-status grok-hook --event SessionStart
+  discord-coding-status muse-hook --event SessionStart
   discord-coding-status clear --session-id ID
   discord-coding-status state
   discord-coding-status quota

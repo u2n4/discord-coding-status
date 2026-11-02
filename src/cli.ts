@@ -6,6 +6,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { grokHookSessionFromArgs } from './grok-hooks';
+import { museHookSessionFromArgs } from './muse-hooks';
+import { antigravityHookSessionFromArgs } from './antigravity-hooks';
 import {
   ClaudeQuotaEngine,
   claudeCredentialGeneration,
@@ -162,6 +164,8 @@ function getRuntimeScriptPath(baseDirectory = getPackageRoot()): string {
   return path.join(baseDirectory, 'dist', 'cli.js');
 }
 
+let daemonStopAttempted = false;
+
 function stopRunningDaemonForUpdate(): void {
   if (isDaemonRestartSkipped()) {
     return;
@@ -304,6 +308,7 @@ function copyRuntimeToInstallDir(): string {
     throw new Error('Missing dist build. Run `npm run build` before setup when working from source.');
   }
 
+  daemonStopAttempted = true;
   stopRunningDaemonForUpdate();
 
   const installDir = getInstallDirectory();
@@ -840,6 +845,15 @@ async function main(): Promise<void> {
     process.exit(process.exitCode || 0);
   }
 
+  // Setup stops the managed daemon before copying the runtime and
+  // re-registering the startup task. If any step after the stop fails
+  // (npm install, schtasks/UAC, hooks), restart the previous daemon so a
+  // failed setup never leaves the runtime stopped. Best effort only: the
+  // original error still propagates. Respects --no-start and the
+  // DISCORD_CODING_STATUS_SKIP_DAEMON_RESTART seam.
+
+  // The catch below restarts the daemon when setup fails after stopping it.
+  try {
   if (await runSetupCommand(command, args, {
     appTitle: APP_TITLE,
     version: VERSION,
@@ -873,6 +887,21 @@ async function main(): Promise<void> {
     process.exit(process.exitCode || 0);
   }
 
+  } catch (error) {
+    if ((command === 'setup' || command === 'install') && daemonStopAttempted && !args['no-start'] && !args.no_start) {
+      try {
+        restartManagedDaemon({
+          macosLaunchAgentId: MACOS_LAUNCH_AGENT_ID,
+          windowsTaskName: getWindowsTaskName(),
+          skipRestart: isDaemonRestartSkipped()
+        });
+      } catch (_) {
+        // Best effort: the original setup error is what matters.
+      }
+    }
+    throw error;
+  }
+
   if (runHooksCommand(command, positionals, {
     appTitle: APP_TITLE,
     getRuntimeScriptPath: copyRuntimeToInstallDir,
@@ -899,6 +928,8 @@ async function main(): Promise<void> {
     getCodexSession: codexHookSessionFromArgs,
     getClaudeSession: claudeHookSessionFromArgs,
     getGrokSession: grokHookSessionFromArgs,
+    getMuseSession: museHookSessionFromArgs,
+    getAntigravitySession: antigravityHookSessionFromArgs,
     getGenericSession: sessionFromArgs,
     isGrokAncestry: isGrokProcessAncestry
   })) {
