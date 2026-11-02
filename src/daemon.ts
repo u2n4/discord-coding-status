@@ -369,6 +369,9 @@ export function acquireDaemonLock(
     // openSync below reports the real error.
   }
 
+  // A busy takeover mutex does not use up attempts: wait until its holder
+  // finishes or it ages out (TAKEOVER_MUTEX_STALE_MS), then decide.
+  const busyDeadline = Date.now() + TAKEOVER_MUTEX_STALE_MS + 2_000;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const content = JSON.stringify({ pid: process.pid, startedAt: Date.now() });
     try {
@@ -426,7 +429,11 @@ export function acquireDaemonLock(
       return false;
     }
     if (takeover === 'busy') {
+      if (Date.now() > busyDeadline) {
+        return false;
+      }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      attempt -= 1;
     }
   }
 

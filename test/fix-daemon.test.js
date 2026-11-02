@@ -421,7 +421,7 @@ test('stopDaemonFromLock never signals a PID whose identity is unknown', (t) => 
   assert.equal(isAlive(decoy.pid), true, 'an unverified PID must never be killed');
 });
 
-test('daemon lock: stale takeover waits for the takeover mutex and ages out a dead one', (t) => {
+test('daemon lock: a starter waits out an orphaned takeover mutex instead of giving up', (t) => {
   const directory = tempDir(t);
   const lockFile = path.join(directory, 'takeover.daemon.lock');
   const mutexFile = `${lockFile}.takeover`;
@@ -430,13 +430,15 @@ test('daemon lock: stale takeover waits for the takeover mutex and ages out a de
   const { acquireDaemonLock, releaseDaemonLock } = require('../dist/daemon');
 
   fs.writeFileSync(lockFile, staleContent);
+  // A mutex left by a starter killed mid-takeover, 9.5 s old: the next
+  // starter must wait it out (not give up after a few retries) and then win.
   fs.writeFileSync(mutexFile, '');
-  assert.equal(acquireDaemonLock(lockFile, () => null), false, 'another starter owns the takeover');
-  assert.equal(fs.readFileSync(lockFile, 'utf8'), staleContent, 'the lock is untouched without the mutex');
-
-  const old = new Date(Date.now() - 60_000);
-  fs.utimesSync(mutexFile, old, old);
-  assert.equal(acquireDaemonLock(lockFile, () => null), true, 'a mutex left by a killed starter ages out');
+  const nearlyStale = new Date(Date.now() - 9_500);
+  fs.utimesSync(mutexFile, nearlyStale, nearlyStale);
+  const started = Date.now();
+  assert.equal(acquireDaemonLock(lockFile, () => null), true, 'an orphaned mutex ages out and the starter wins');
+  const waited = Date.now() - started;
+  assert.ok(waited >= 300 && waited < 5_000, `waited ${waited} ms for the mutex to age out`);
   assert.equal(JSON.parse(fs.readFileSync(lockFile, 'utf8')).pid, process.pid);
   assert.equal(fs.existsSync(mutexFile), false);
   releaseDaemonLock(lockFile);
