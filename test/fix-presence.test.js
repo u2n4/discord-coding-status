@@ -165,7 +165,7 @@ test('Antigravity ignores the transcript path and a stale hook model', async (t)
     details: '',
     state: ''
   });
-  assert.equal(enriched.details, 'Model: claude-opus-5-5-high');
+  assert.equal(enriched.details, 'Model: Claude Opus 5.5');
   assert.equal(enriched.source, 'process', 'live model reads must not promote a process tool to hook');
 });
 
@@ -208,4 +208,39 @@ test('Antigravity clears an older hook model when the current pick is unknown', 
     state: ''
   });
   assert.equal(enriched.details, '');
+});
+
+test('model labels read like each app: Opus 5.5, Gemini 4 Argon', () => {
+  const { displayModelLabel } = require('../dist/providers/model-label');
+  const cases = [
+    ['claude', 'claude-opus-5-5', 'Opus 5.5'],
+    ['claude', 'claude-opus-5-5[1m]', 'Opus 5.5'],
+    ['claude', 'claude-sonnet-4-5-20250929', 'Sonnet 4.5'],
+    ['claude', 'claude-fable-5-1', 'Fable 5.1'],
+    ['claude', 'Opus 5.5', 'Opus 5.5'],
+    ['antigravity', 'gemini-4-argon-trial', 'Gemini 4 Argon'],
+    ['antigravity', 'gemini-3.8-flash-n', 'Gemini 3.8 Flash'],
+    ['antigravity', 'gemini-3-flash-a', 'Gemini 3 Flash'],
+    ['antigravity', 'claude-opus-5-5-high', 'Claude Opus 5.5'],
+    ['antigravity', 'claude-sonnet-5-5-medium', 'Claude Sonnet 5.5'],
+    ['antigravity', 'claude-opus-4-6-thinking', 'Claude Opus 4.6'],
+    ['antigravity', 'gpt-oss-120b-medium', 'GPT OSS 120B'],
+    ['codex', 'gpt-6.1-sol', 'gpt-6.1-sol'],
+    ['muse', 'muse-spark-1.3-contributor', 'muse-spark-1.3-contributor']
+  ];
+  for (const [family, id, expected] of cases) {
+    assert.equal(displayModelLabel(family, id), expected, `${family} ${id}`);
+  }
+});
+
+test('Antigravity publishes the app label for a learned placeholder', async (t) => {
+  const home = tempDir(t, 'dcs-fix-ag4-');
+  withEnv(t, 'DISCORD_CODING_STATUS_ANTIGRAVITY_HOME', home);
+  resetAntigravityModelLearning();
+  t.after(() => resetAntigravityModelLearning());
+  fs.writeFileSync(path.join(home, 'antigravity_state.pbtxt'), 'last_selected_agent_model:  MODEL_PLACEHOLDER_M418\n');
+  const enriched = await enrichToolForPresence({
+    key: 'state:ag', providerId: 'antigravityApp', family: 'antigravity', source: 'hook', model: null, details: '', state: ''
+  });
+  assert.equal(enriched.details, 'Model: Gemini 4 Argon');
 });

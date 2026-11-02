@@ -175,7 +175,7 @@ test('quota --tool claude uses the fixed OAuth usage host and fails closed for A
 // never depend on it.
 const SLOW_QUOTA_DELAY_MS = 2000;
 
-test('native Claude hooks publish the raw model immediately and never quota', async (t) => {
+test('native Claude hooks publish the app model label immediately and never quota', async (t) => {
   const { directory, env: baseEnv, rpcLogFile, stateFile } = createTestEnvironment(t);
   const { env, requestLogFile } = claudeTestEnvironment(baseEnv, directory, {
     DISCORD_CODING_STATUS_MOCK_CLAUDE_DELAY_MS: String(SLOW_QUOTA_DELAY_MS)
@@ -218,7 +218,7 @@ test('native Claude hooks publish the raw model immediately and never quota', as
   const modelActivity = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.details === 'Model: claude-sonnet-4-6'
+        && event.activity.details === 'Model: Sonnet 4.6'
     ),
     'the Claude model to reach Discord',
     1200
@@ -270,7 +270,7 @@ test('native Claude hooks publish the raw model immediately and never quota', as
   await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.details === 'Model: claude-opus-4-6'
+        && event.activity.details === 'Model: Opus 4.6'
     ),
     'the changed Claude model to reach Discord'
   );
@@ -299,7 +299,7 @@ test('native Claude hooks publish the raw model immediately and never quota', as
   const latestAfterAccountChange = readRpcEvents(rpcLogFile)
     .filter((event) => event.method === 'setActivity')
     .pop();
-  assert.equal(latestAfterAccountChange.activity.details, 'Model: claude-opus-4-6');
+  assert.equal(latestAfterAccountChange.activity.details, 'Model: Opus 4.6');
 
   await runCli(
     ['claude-hook', '--event', 'PostToolUse', '--activity', 'Custom provider model only'],

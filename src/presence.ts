@@ -43,6 +43,7 @@ import { readMuseExecModelForProcess } from './providers/muse/model';
 import { readCodexConfiguredModel, readCodexDesktopModel } from './providers/codex/model';
 import { readGrokSessionSummaryModel } from './providers/grok/model';
 import { readActiveAntigravityModel, readAntigravityStatePlaceholder } from './providers/antigravity/model';
+import { displayModelLabel } from './providers/model-label';
 import type { ActiveTool, ProcessInfo } from './core/tools/types';
 import type {
   PackageInfo,
@@ -601,7 +602,7 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
 
   return {
     ...tool,
-    details: model ? truncatePresenceText(`Model: ${model}`) : '',
+    details: model ? truncatePresenceText(`Model: ${displayModelLabel(tool.family, model)}`) : '',
     state: ''
   };
 }

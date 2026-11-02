@@ -683,6 +683,9 @@ function claudeDesktopProviderMatchesPid(pid: number): boolean {
   }
 }
 
+const DESKTOP_LABEL_GRACE_MS = 2_000;
+let desktopLabelPending: { pid: number; since: number } | null = null;
+
 function getVerifiedDesktopModelForDisplay(): VerifiedClaudeDesktopModel | null {
   // Retention policy: a verified UI model stays displayable while its PID is
   // still a live Claude Desktop process and the last Desktop observation is
@@ -962,6 +965,7 @@ async function runFastPass(generation: number): Promise<void> {
   // and family from above — never a second persistent helper and never a
   // redundant per-tick census.
   let desktopOverride: ClaudeDesktopDisplayOverride = null;
+  let holdForDesktopLabel = false;
   const claudeDisplayable = displayable.some((tool) => toolFamilyForTool(tool) === 'claude');
   if (PROCESS_DETECTION_ENABLED && claudeDisplayable) {
     const desktopFgPid = competingForegroundPid;
@@ -972,13 +976,24 @@ async function runFastPass(generation: number): Promise<void> {
       ensureClaudeDesktopModelTracker(desktopFgPid);
       const verified = getVerifiedDesktopModelForDisplay();
       if (verified) {
+        desktopLabelPending = null;
         desktopOverride = { kind: 'model', model: verified.model };
       } else {
         // Desktop foreground without a verified model: fail closed to
-        // app-only so a stale background CLI label is never attached.
+        // app-only so a stale background CLI label is never attached. The UIA
+        // read takes about a second after focus, so during that grace window
+        // the previous activity is held instead of flashing app-only.
+        if (!desktopLabelPending || desktopLabelPending.pid !== desktopFgPid) {
+          desktopLabelPending = { pid: desktopFgPid, since: Date.now() };
+          setTimeout(() => requestFastUpdate('Claude Desktop label grace elapsed'), DESKTOP_LABEL_GRACE_MS + 50).unref?.();
+        }
+        if (Date.now() - desktopLabelPending.since < DESKTOP_LABEL_GRACE_MS) {
+          holdForDesktopLabel = true;
+        }
         desktopOverride = { kind: 'app-only' };
       }
     } else {
+      desktopLabelPending = null;
       ensureClaudeDesktopModelTracker(null);
       if (desktopFgFamily === 'claude') {
         // CLI foreground (same family, competing surface): clear a stale
@@ -1018,6 +1033,11 @@ async function runFastPass(generation: number): Promise<void> {
     debugLog(`Fast pass ${generation} publishing despite a queued event (${consecutiveFastAborts} consecutive aborts).`);
   }
   consecutiveFastAborts = 0;
+
+  if (holdForDesktopLabel) {
+    debugLog(`Fast pass ${generation} holding the current activity while the Claude Desktop label is read.`);
+    return;
+  }
 
   const withDesktop = desktopOverride ? applyClaudeDesktopDisplayOverride(activeTools, desktopOverride) : activeTools;
 
