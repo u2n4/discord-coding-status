@@ -239,7 +239,15 @@ export function installWindowsScheduledTask(
     '/F'
   ];
 
-  try {
+  // The launchers were just rewritten in place, so a task that already points
+  // at this VBS needs no change. Re-creating it anyway fails with "Access is
+  // denied" when the existing task was registered elevated, and the elevated
+  // retry then blocks setup on a UAC prompt for nothing.
+  const existingTarget = queryWindowsTaskTarget(options.taskName);
+  const alreadyRegistered = Boolean(existingTarget)
+    && path.resolve(existingTarget as string).toLowerCase() === path.resolve(hiddenPath).toLowerCase();
+
+  if (!alreadyRegistered) try {
     execFileSync('schtasks', args, { stdio: ['ignore', 'ignore', 'pipe'] });
   } catch (error) {
     const detail = (error && typeof error === 'object' && 'stderr' in error)
