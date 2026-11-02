@@ -1,6 +1,9 @@
 'use strict';
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 // Persistent Windows foreground sampler: ONE hidden PowerShell child that calls
 // GetForegroundWindow/GetWindowThreadProcessId every ~120ms and emits PID-only
@@ -56,6 +59,13 @@ export function isForegroundWatchEnabled(): boolean {
 // Builds the sampler script. Exported so tests can assert Add-Type-once,
 // PID-only output, parent-death/stdin-EOF cleanup, and the absence of any
 // title/text capture without spawning PowerShell.
+export function foregroundSamplerDllPath(csharpSource: string): string {
+  const base = process.env.DISCORD_CODING_STATUS_HELPER_CACHE_DIR
+    || path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'discord-coding-status', 'cache');
+  const hash = createHash('sha256').update(csharpSource).digest('hex').slice(0, 16);
+  return path.join(base, `foreground-sampler-${hash}.dll`);
+}
+
 export function buildForegroundSamplerScript(parentPid: number, sampleMs: number): string {
   const flooredParent = Math.floor(parentPid);
   if (!Number.isFinite(parentPid) || !Number.isFinite(flooredParent) || flooredParent <= 0) {
@@ -103,9 +113,22 @@ export function buildForegroundSamplerScript(parentPid: number, sampleMs: number
     ' return 0; } } }'
   ].join(' ');
 
+  // Compiling the C# (csc) costs ~2.5 s per helper start, so it is compiled once
+  // into a DLL named after the source hash and later starts only load it. A
+  // concurrent first compile or an unwritable cache falls back to compiling in
+  // memory for this run.
+  const dllPath = foregroundSamplerDllPath(csharp).replace(/'/g, "''");
+  const load = [
+    `$watchDll='${dllPath}'`,
+    'if (-not (Test-Path -LiteralPath $watchDll)) { try { New-Item -ItemType Directory -Force -Path (Split-Path -Parent $watchDll) | Out-Null; '
+      + `Add-Type -TypeDefinition '${csharp}' -OutputAssembly $watchDll -OutputType Library | Out-Null } catch { } }`,
+    'if (-not ([System.Management.Automation.PSTypeName]\'Win32.ForegroundSampler\').Type) { try { Add-Type -LiteralPath $watchDll | Out-Null } catch { '
+      + `try { Add-Type -TypeDefinition '${csharp}' | Out-Null } catch { Write-Error ("foreground sampler type-load failed: " + $_.Exception.Message); exit 2 } } }`
+  ];
+
   return [
     "$ErrorActionPreference='Stop'",
-    `try { Add-Type -TypeDefinition '${csharp}' | Out-Null } catch { Write-Error ("foreground sampler type-load failed: " + $_.Exception.Message); exit 2 }`,
+    ...load,
     `$watchParent=${safeParent}`,
     'if ($watchParent -le 0) { Write-Error ("foreground sampler invalid parent"); exit 2 }',
     `$watchSample=${safeSample}`,

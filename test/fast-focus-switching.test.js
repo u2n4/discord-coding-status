@@ -410,8 +410,10 @@ test('foreground watch toggle honors the off switch', (t) => {
 test('sampler script compiles one event-driven helper, emits PID-only, and self-exits on parent death/stdin EOF', () => {
   const script = buildForegroundSamplerScript(4242, 120);
 
-  const addTypeCount = (script.match(/Add-Type/g) || []).length;
-  assert.equal(addTypeCount, 1, 'Add-Type must run once per helper lifetime');
+  // Compile once into a cached DLL, load it; in-memory compile only as fallback.
+  assert.match(script, /-OutputAssembly \$watchDll/, 'the sampler is compiled once into a cached DLL');
+  assert.match(script, /Add-Type -LiteralPath \$watchDll/, 'later starts load the cached DLL');
+  assert.match(script, /PSTypeName\]'Win32\.ForegroundSampler'/, 'never defines the type twice');
 
   assert.match(script, /SetWinEventHook\(3, 3,/, 'EVENT_SYSTEM_FOREGROUND hook, no polling loop in script');
   assert.match(script, /GetForegroundWindow/);
@@ -420,8 +422,12 @@ test('sampler script compiles one event-driven helper, emits PID-only, and self-
   assert.match(script, /OpenStandardInput/, 'stdin EOF ends the helper');
   assert.match(script, /Thread\.Sleep\(sampleMs\)/, 'polling fallback when the hook cannot be installed');
 
-  const writeCount = (script.match(/Console\.Out\.WriteLine/g) || []).length;
-  assert.equal(writeCount, 1, 'exactly one PID-only emission point');
+  // The C# source appears twice (cached compile + in-memory fallback); every
+  // stdout write in it is the numeric foreground PID.
+  const writes = script.match(/Console\.Out\.WriteLine\([^)]*\)/g) || [];
+  assert.ok(writes.length > 0);
+  assert.deepEqual([...new Set(writes)], ['Console.Out.WriteLine(foreground)'], 'PID-only emission');
+  assert.doesNotMatch(script, /Write-Output/, 'nothing else is written to stdout');
 
   assert.doesNotMatch(script, /WindowText/);
   assert.doesNotMatch(script, /GetTitle/);

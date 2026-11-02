@@ -159,6 +159,43 @@ export function queryWindowsTaskTarget(taskName: string): string | null {
   }
 }
 
+function queryWindowsTaskXml(taskName: string): string | null {
+  if (process.platform !== 'win32') {
+    return null;
+  }
+  try {
+    const output = execFileSync('schtasks', ['/Query', '/TN', taskName, '/XML'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    return typeof output === 'string' ? output : String(output);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * True only when an existing task is exactly what setup would create: enabled
+ * (no `<Enabled>false</Enabled>` on the task or its trigger), started by a
+ * logon trigger, running `wscript.exe` on this launcher. Anything else is
+ * re-created.
+ */
+export function isHealthyLauncherTask(xml: string | null, hiddenPath: string): boolean {
+  if (!xml) {
+    return false;
+  }
+  if (/<Enabled>\s*false\s*<\/Enabled>/i.test(xml) || !/<LogonTrigger\b/i.test(xml)) {
+    return false;
+  }
+  const command = xml.match(/<Command>([\s\S]*?)<\/Command>/i)?.[1]?.trim().replace(/^"+|"+$/g, '') || '';
+  if (path.win32.basename(command).toLowerCase() !== 'wscript.exe') {
+    return false;
+  }
+  const target = parseWindowsTaskActionTarget(xml);
+  return Boolean(target)
+    && path.win32.resolve(target as string).toLowerCase() === path.win32.resolve(hiddenPath).toLowerCase();
+}
+
 /** Daemon log size that triggers rotation to `<name>.1` at the next launch. */
 export const LOG_ROTATE_MAX_BYTES = 1024 * 1024;
 
@@ -210,7 +247,10 @@ export function writeWindowsHiddenLauncher(
 // <...discord-coding-status...>\dist\cli.js followed by the `daemon` argument.
 // Used by setup's stop step; it contains no single quote, so it can sit inside a
 // single-quoted PowerShell string as-is.
-export const DAEMON_COMMAND_LINE_PATTERN = String.raw`^\s*"?[^"]*?(?:node|bun)(?:\.exe)?"?\s+"?[^"]*discord-coding-status[^"]*[\\/]dist[\\/]cli\.js"?\s+daemon(?:\s|$)`;
+// Interpreter token, then the SCRIPT token itself (one quoted token, or one
+// token without spaces), then `daemon`: a path that merely appears in a later
+// argument of some other script can never match.
+export const DAEMON_COMMAND_LINE_PATTERN = String.raw`^\s*(?:"[^"]*[\\/](?:node|bun)(?:\.exe)?"|(?:[^\s"]*[\\/])?(?:node|bun)(?:\.exe)?)\s+(?:"[^"]*discord-coding-status[^"]*[\\/]dist[\\/]cli\.js"|[^\s"]*discord-coding-status[^\s"]*[\\/]dist[\\/]cli\.js)\s+daemon(?:\s|$)`;
 
 /**
  * Bound for the elevated `schtasks /Create` retry. `Start-Process -Wait`
@@ -243,9 +283,7 @@ export function installWindowsScheduledTask(
   // at this VBS needs no change. Re-creating it anyway fails with "Access is
   // denied" when the existing task was registered elevated, and the elevated
   // retry then blocks setup on a UAC prompt for nothing.
-  const existingTarget = queryWindowsTaskTarget(options.taskName);
-  const alreadyRegistered = Boolean(existingTarget)
-    && path.resolve(existingTarget as string).toLowerCase() === path.resolve(hiddenPath).toLowerCase();
+  const alreadyRegistered = isHealthyLauncherTask(queryWindowsTaskXml(options.taskName), hiddenPath);
 
   if (!alreadyRegistered) try {
     execFileSync('schtasks', args, { stdio: ['ignore', 'ignore', 'pipe'] });

@@ -26,6 +26,9 @@ test('setup stop pattern matches only node/bun running dist/cli.js daemon', () =
   const bystanders = [
     // An agent whose prompt mentions the daemon command line.
     '"C:\\Program Files\\nodejs\\node.exe" C:\\tools\\agent.js "review discord-coding-status\\dist\\cli.js daemon"',
+    // Another node script that receives the daemon path as a later argument.
+    'node C:\\tools\\agent.js C:\\discord-coding-status\\dist\\cli.js daemon',
+    '"C:\\Program Files\\nodejs\\node.exe" C:\\tools\\agent.js "C:\\x\\discord-coding-status\\dist\\cli.js" daemon',
     // A shell that mentions it.
     'C:\\Program Files\\Git\\bin\\bash.exe -c "cat discord-coding-status/dist/cli.js daemon"',
     // The same CLI running a different command.
@@ -36,6 +39,22 @@ test('setup stop pattern matches only node/bun running dist/cli.js daemon', () =
     assert.doesNotMatch(line, pattern, line);
   }
   assert.equal(DAEMON_COMMAND_LINE_PATTERN.includes("'"), false, 'safe inside a single-quoted PowerShell string');
+});
+
+test('setup keeps an existing task only when it is exactly the launcher task', () => {
+  const { isHealthyLauncherTask } = require('../dist/adapters/startup/service');
+  const vbs = 'C:\\Users\\a\\AppData\\Local\\discord-coding-status\\app\\discord-coding-status.vbs';
+  const xml = (body) => `<?xml version="1.0"?><Task><Triggers>${body.trigger ?? '<LogonTrigger></LogonTrigger>'}</Triggers>`
+    + `<Settings>${body.settings ?? ''}</Settings><Actions><Exec><Command>${body.command ?? 'wscript.exe'}</Command>`
+    + `<Arguments>${body.args ?? vbs}</Arguments></Exec></Actions></Task>`;
+  assert.equal(isHealthyLauncherTask(xml({}), vbs), true);
+  assert.equal(isHealthyLauncherTask(xml({ args: `&quot;${vbs}&quot;` }), vbs), true, 'quoted target');
+  assert.equal(isHealthyLauncherTask(null, vbs), false, 'missing task');
+  assert.equal(isHealthyLauncherTask(xml({ settings: '<Enabled>false</Enabled>' }), vbs), false, 'disabled task');
+  assert.equal(isHealthyLauncherTask(xml({ trigger: '<LogonTrigger><Enabled>false</Enabled></LogonTrigger>' }), vbs), false, 'disabled trigger');
+  assert.equal(isHealthyLauncherTask(xml({ trigger: '<BootTrigger></BootTrigger>' }), vbs), false, 'no logon trigger');
+  assert.equal(isHealthyLauncherTask(xml({ command: 'cscript.exe' }), vbs), false, 'wrong executable');
+  assert.equal(isHealthyLauncherTask(xml({ args: 'C:\\other\\x.vbs' }), vbs), false, 'other launcher');
 });
 
 test('a CLI hook does not hide the same tool\'s desktop app', () => {
