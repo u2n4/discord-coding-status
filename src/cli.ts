@@ -202,7 +202,10 @@ function stopRunningDaemonForUpdate(): void {
         '-ExecutionPolicy',
         'Bypass',
         '-Command',
-        `Get-CimInstance Win32_Process | Where-Object { ($_.CommandLine -like "*discord-coding-status*daemon*" -or $_.CommandLine -like '*${installDirPattern}*') -and $_.ProcessId -ne ${process.pid} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`
+        // Only node/bun running `cli.js daemon`: a bare "*discord-coding-status*daemon*"
+        // match also killed shells, editors and agents whose command line merely
+        // mentioned the repo and a daemon file.
+        `Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='bun.exe'" | Where-Object { ($_.CommandLine -like "*discord-coding-status*cli.js*daemon*" -or $_.CommandLine -like '*${installDirPattern}*cli.js*daemon*') -and $_.ProcessId -ne ${process.pid} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`
       ], { stdio: 'ignore' });
     } catch (_) {
       try {
