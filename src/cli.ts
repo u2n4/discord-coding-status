@@ -46,6 +46,7 @@ import { runHooksCommand } from './commands/hooks/command';
 import { runStateCommand } from './commands/state/command';
 import { runQuotaCommand } from './commands/quota/command';
 import {
+  DAEMON_COMMAND_LINE_PATTERN,
   getMacLaunchAgentPath,
   installMacLaunchAgent,
   installWindowsScheduledTask,
@@ -166,16 +167,6 @@ function getRuntimeScriptPath(baseDirectory = getPackageRoot()): string {
 
 let daemonStopAttempted = false;
 
-/**
- * Escapes a literal for a single-quoted PowerShell `-like` pattern. `-like`
- * treats `* ? [ ]` as wildcards and uses the backtick (not backslash) as its
- * escape, so Windows paths keep their single backslashes; `'` is doubled for
- * the single-quoted string.
- */
-function powershellLikeLiteral(value: string): string {
-  return value.replace(/[*?[\]`]/g, (char) => `\`${char}`).replace(/'/g, "''");
-}
-
 // Stops only the daemon PID recorded in its lock (identity-verified) so a
 // following task /Run can take the lock.
 function stopManagedDaemonFromLock(): void {
@@ -196,16 +187,15 @@ function stopRunningDaemonForUpdate(): void {
     } catch (_) {}
 
     try {
-      const installDirPattern = powershellLikeLiteral(getInstallDirectory());
       execFileSync('powershell.exe', [
         '-NoProfile',
         '-ExecutionPolicy',
         'Bypass',
         '-Command',
-        // Only node/bun running `cli.js daemon`: a bare "*discord-coding-status*daemon*"
-        // match also killed shells, editors and agents whose command line merely
-        // mentioned the repo and a daemon file.
-        `Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='bun.exe'" | Where-Object { ($_.CommandLine -like "*discord-coding-status*cli.js*daemon*" -or $_.CommandLine -like '*${installDirPattern}*cli.js*daemon*') -and $_.ProcessId -ne ${process.pid} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`
+        // Only node/bun whose SCRIPT is <...discord-coding-status...>\dist\cli.js and
+        // whose first argument is `daemon`. Wildcard matches on the whole command
+        // line also killed shells, editors and agents that merely mentioned it.
+        `Get-CimInstance Win32_Process -Filter "Name='node.exe' OR Name='bun.exe'" | Where-Object { $_.CommandLine -match '${DAEMON_COMMAND_LINE_PATTERN}' -and $_.ProcessId -ne ${process.pid} } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`
       ], { stdio: 'ignore' });
     } catch (_) {
       try {

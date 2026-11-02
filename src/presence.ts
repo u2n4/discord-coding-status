@@ -357,6 +357,14 @@ export function toolFromSession(session: HookSessionState): ActiveTool {
   };
 }
 
+function isAppSurface(tool: ActiveTool): boolean {
+  if (typeof tool.providerId !== 'string') {
+    return false;
+  }
+  const provider = toolProviders.find((candidate) => candidate.id === tool.providerId);
+  return provider ? provider.process?.surface === 'desktop' : tool.providerId.endsWith('App');
+}
+
 function familyKeyForTool(tool: ActiveTool): string {
   const family = toolFamilyForTool(tool);
   return family === 'other' ? `other:${tool.key}` : family;
@@ -441,8 +449,11 @@ export function mergeActiveTools(primary: ActiveTool[], fallback: ActiveTool[]):
   const tools: ActiveTool[] = [];
   const seen = new Set<string>();
 
+  // One entry per family AND surface: a CLI hook must not hide the same tool's
+  // desktop app (or the reverse), because selection prefers the app unless the
+  // CLI is in front.
   for (const tool of [...primary, ...fallback]) {
-    const key = familyKeyForTool(tool);
+    const key = `${familyKeyForTool(tool)}|${isAppSurface(tool) ? 'app' : 'cli'}`;
 
     if (seen.has(key)) {
       continue;
@@ -723,9 +734,7 @@ function sourceRank(tool: ActiveTool): number {
  * actually typing in. Stale hook sessions cannot block forever: they are pruned
  * from the state file after `STATE_MAX_AGE_MS`.
  */
-function isAppSurface(tool: ActiveTool): boolean {
-  return typeof tool.providerId === 'string' && tool.providerId.endsWith('App');
-}
+
 
 // Within one family the desktop app wins, unless the user is working in that
 // tool's CLI right now (a terminal owns the foreground).

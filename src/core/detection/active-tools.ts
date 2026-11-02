@@ -158,11 +158,14 @@ export function detectActiveTools(
     return processInfo ? [{ provider, processInfo, registryIndex }] : [];
   });
 
+  // Grouped per family AND surface so a running desktop app and its CLI are
+  // both reported; selection decides which one Discord shows.
   const families = new Map<string, ProviderProcessMatch[]>();
   for (const match of matches) {
-    const familyMatches = families.get(match.provider.family) || [];
+    const groupKey = `${match.provider.family}|${match.provider.process?.surface === 'desktop' ? 'app' : 'cli'}`;
+    const familyMatches = families.get(groupKey) || [];
     familyMatches.push(match);
-    families.set(match.provider.family, familyMatches);
+    families.set(groupKey, familyMatches);
   }
 
   return [...families.values()]

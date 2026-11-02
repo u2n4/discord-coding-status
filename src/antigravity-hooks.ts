@@ -8,8 +8,10 @@ import { envPathValue, resolveHomePath } from './commands/config/settings';
 import { getArgString } from './commands/args';
 import { readHookInput, sleepSync } from './state-store';
 import {
+  getAntigravityCliHomeDir,
   normalizeAntigravityModel,
-  readActiveAntigravityModel
+  readActiveAntigravityModel,
+  readAntigravityCliModel
 } from './providers/antigravity/model';
 import type { HookSessionState } from './core/hooks/types';
 
@@ -307,6 +309,21 @@ export function installManagedAntigravityHooks(
   };
 }
 
+export function isAntigravityCliConversation(conversationId: string, transcriptPath: string | null): boolean {
+  const cliHome = path.resolve(getAntigravityCliHomeDir()).toLowerCase();
+  if (transcriptPath && path.resolve(transcriptPath).toLowerCase().startsWith(cliHome + path.sep)) {
+    return true;
+  }
+  if (!conversationId || !/^[A-Za-z0-9-]{8,64}$/.test(conversationId)) {
+    return false;
+  }
+  try {
+    return fs.existsSync(path.join(getAntigravityCliHomeDir(), 'conversations', `${conversationId}.db`));
+  } catch (_) {
+    return false;
+  }
+}
+
 export function antigravityHookSessionFromArgs(
   args: Record<string, string | boolean>
 ): HookSessionState {
@@ -366,18 +383,22 @@ export function antigravityHookSessionFromArgs(
       break;
   }
 
+  // The Antigravity CLI (agy) loads the same hooks.json; its conversations and
+  // transcripts live under ~/.gemini/antigravity-cli, the app's under
+  // ~/.gemini/antigravity. Each surface reads its own model source.
+  const fromCli = isAntigravityCliConversation(conversationId, transcriptPath);
   const rawModel = getArgString(args, 'model')
     || (typeof input.modelName === 'string' ? input.modelName : '')
     || (typeof input.model === 'string' ? input.model : '');
   const model = normalizeAntigravityModel(rawModel)
-    || readActiveAntigravityModel(transcriptPath)?.model
+    || (fromCli ? readAntigravityCliModel()?.model : readActiveAntigravityModel(transcriptPath)?.model)
     || undefined;
 
   const now = Date.now();
   return {
     session_id: conversationId || `antigravity:${cwd || 'default'}`,
     tool: 'antigravity',
-    surface: 'desktop',
+    surface: fromCli ? 'cli' : 'desktop',
     cwd,
     status,
     activity,

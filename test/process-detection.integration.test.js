@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { detectActiveTools } = require('../dist/core/detection/active-tools');
 const { toolProviders } = require('../dist/providers/registry');
+const { selectNewestTool } = require('../dist/presence');
 const {
   detectedClaudeForSetup,
   shouldInstallClaudeHooks
@@ -19,7 +20,7 @@ function processInfo(pid, line, executablePath = null) {
   };
 }
 
-test('active-tool orchestration prefers desktop Codex unless CLI preference is enabled', () => {
+test('active-tool orchestration reports each desktop app and its CLI; selection prefers the app', () => {
   const processes = [
     processInfo(1, '/Applications/ChatGPT.app/Contents/MacOS/ChatGPT'),
     processInfo(2, '/opt/homebrew/bin/codex', '/opt/homebrew/bin/codex'),
@@ -27,16 +28,14 @@ test('active-tool orchestration prefers desktop Codex unless CLI preference is e
     processInfo(4, '/opt/homebrew/bin/claude', '/opt/homebrew/bin/claude')
   ];
 
+  const tools = detectActiveTools(processes, toolProviders);
   assert.deepEqual(
-    detectActiveTools(processes, toolProviders).map((tool) => tool.key),
-    ['claude', 'codexApp']
+    tools.map((tool) => tool.providerId).sort(),
+    ['claudeApp', 'claudeCode', 'codexApp', 'codexCli']
   );
-  assert.deepEqual(
-    detectActiveTools(processes, toolProviders, {
-      preferredSurfaceByFamily: { codex: 'cli' }
-    }).map((tool) => tool.key),
-    ['claude', 'codexCli']
-  );
+  const codex = tools.filter((tool) => tool.family === 'codex');
+  assert.equal(selectNewestTool(codex, 'codex')?.providerId, 'codexApp');
+  assert.equal(selectNewestTool(codex, 'codex', 'cli')?.providerId, 'codexCli');
 });
 
 test('Claude Desktop alone does not enable Claude Code lifecycle hooks', () => {

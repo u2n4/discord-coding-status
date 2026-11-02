@@ -206,6 +206,12 @@ export function writeWindowsHiddenLauncher(
   return vbsPath;
 }
 
+// PowerShell -match pattern for a node/bun command line whose script is
+// <...discord-coding-status...>\dist\cli.js followed by the `daemon` argument.
+// Used by setup's stop step; it contains no single quote, so it can sit inside a
+// single-quoted PowerShell string as-is.
+export const DAEMON_COMMAND_LINE_PATTERN = String.raw`^\s*"?[^"]*?(?:node|bun)(?:\.exe)?"?\s+"?[^"]*discord-coding-status[^"]*[\\/]dist[\\/]cli\.js"?\s+daemon(?:\s|$)`;
+
 /**
  * Bound for the elevated `schtasks /Create` retry. `Start-Process -Wait`
  * blocks until the UAC prompt is answered, which never happens in a

@@ -204,6 +204,11 @@ function startCensusHelper(): ChildProcessWithoutNullStreams {
   };
   child.on('exit', onGone);
   child.on('error', onGone);
+  // A write into a pipe the helper just closed raises EPIPE asynchronously on
+  // the stream; without a listener it would crash the daemon instead of
+  // falling back to the one-shot census.
+  child.stdin.on('error', onGone);
+  child.stdout.on('error', onGone);
   // Never keep the daemon's event loop alive on the helper's account.
   child.unref();
   (child.stdin as unknown as { unref?: () => void }).unref?.();
