@@ -403,11 +403,64 @@ export function acquireDaemonLock(
     if (existing.pid && isDaemonLockHolderLive(existing, lookup)) {
       return false;
     }
-    log(`Removing stale daemon lock (PID ${existing.pid || 'unknown'}).`);
-    unlinkIfLockContent(lockFile, existing.raw);
+    // Read-then-unlink is not atomic: two starters that both saw the same
+    // stale content could each delete the other's fresh lock. Only the holder
+    // of the takeover mutex may remove a lock, and it re-checks under it.
+    const takeover = withDaemonTakeoverMutex(lockFile, () => {
+      const current = readDaemonLock(lockFile);
+      if (!current || current.raw !== existing.raw) {
+        return 'retry';
+      }
+      if (current.pid && isDaemonLockHolderLive(current, lookup)) {
+        return 'held';
+      }
+      log(`Removing stale daemon lock (PID ${current.pid || 'unknown'}).`);
+      try {
+        fs.unlinkSync(lockFile);
+      } catch (_) {
+        // Already gone: the next exclusive create decides.
+      }
+      return 'retry';
+    });
+    if (takeover === 'held') {
+      return false;
+    }
+    if (takeover === 'busy') {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
   }
 
   return false;
+}
+
+const TAKEOVER_MUTEX_STALE_MS = 10_000;
+
+function withDaemonTakeoverMutex(
+  lockFile: string,
+  takeover: () => 'retry' | 'held'
+): 'retry' | 'held' | 'busy' {
+  const mutexFile = `${lockFile}.takeover`;
+  try {
+    fs.closeSync(fs.openSync(mutexFile, 'wx'));
+  } catch (error) {
+    if ((error as { code?: string }).code !== 'EEXIST') {
+      return 'busy';
+    }
+    try {
+      // A starter killed mid-takeover leaves the mutex behind; age it out.
+      if (Date.now() - fs.statSync(mutexFile).mtimeMs > TAKEOVER_MUTEX_STALE_MS) {
+        fs.unlinkSync(mutexFile);
+      }
+    } catch (_) {}
+    return 'busy';
+  }
+  try {
+    return takeover();
+  } finally {
+    try {
+      fs.unlinkSync(mutexFile);
+    } catch (_) {}
+  }
 }
 
 export function releaseDaemonLock(lockFile: string = DAEMON_LOCK_FILE): void {
@@ -433,6 +486,13 @@ export function stopDaemonFromLock(
   }
   if (!isDaemonLockHolderLive(lock, options.lookup)) {
     return 'stale';
+  }
+  // "Live" deliberately errs toward live when the identity query fails (so a
+  // duplicate never starts); killing needs the opposite bias: only a PID that
+  // positively identifies as our daemon is ever signalled.
+  const identity = (options.lookup ?? queryDaemonProcessIdentity)(lock.pid);
+  if (!identity || !isDaemonProcessIdentity(identity, lock.startedAt)) {
+    return 'still-running';
   }
   try {
     process.kill(lock.pid);

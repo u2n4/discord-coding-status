@@ -190,3 +190,22 @@ test('destroyRpcClient swallows the async destroy rejection', async () => {
   }
   assert.deepEqual(seen, []);
 });
+
+test('Antigravity clears an older hook model when the current pick is unknown', async (t) => {
+  const home = tempDir(t, 'dcs-fix-ag3-');
+  withEnv(t, 'DISCORD_CODING_STATUS_ANTIGRAVITY_HOME', home);
+  resetAntigravityModelLearning();
+  t.after(() => resetAntigravityModelLearning());
+  fs.writeFileSync(path.join(home, 'antigravity_state.pbtxt'), 'last_selected_agent_model:  MODEL_PLACEHOLDER_M999\n');
+
+  const enriched = await enrichToolForPresence({
+    key: 'state:ag',
+    providerId: 'antigravityApp',
+    family: 'antigravity',
+    source: 'hook',
+    model: 'claude-opus-5-5-high',
+    details: '',
+    state: ''
+  });
+  assert.equal(enriched.details, '');
+});

@@ -215,3 +215,32 @@ test('Muse exec model cache re-reads a session log when it changes', (t) => {
   fs.rmSync(duplicateDir, { recursive: true, force: true });
   assert.equal(readMuseExecModelForProcess(proc).model, 'muse-model-b', 'removed duplicate drops out');
 });
+
+test('hooks setup restarts the daemon when an installer refuses to write', () => {
+  const { runHooksCommand } = require('../dist/commands/hooks/command');
+  let restarts = 0;
+  const refusing = {
+    capability: 'antigravity',
+    label: 'Antigravity',
+    install: () => {
+      throw new Error('Refusing to modify hooks.json: it does not parse');
+    },
+    uninstall: () => ({ removed: 0, target: 'x' }),
+    status: () => ({})
+  };
+  assert.throws(
+    () => runHooksCommand('hooks', ['setup', 'antigravity'], {
+      appTitle: 'Discord Coding Status',
+      getRuntimeScriptPath: () => 'cli.js',
+      installers: [refusing],
+      detectedInstallers: () => [refusing],
+      findInstaller: (name) => (name === 'antigravity' ? refusing : null),
+      restartDaemon: () => {
+        restarts += 1;
+        return { status: 'restarted' };
+      }
+    }),
+    /Refusing to modify/
+  );
+  assert.equal(restarts, 1, 'the runtime copy stopped the daemon, so it must come back up');
+});

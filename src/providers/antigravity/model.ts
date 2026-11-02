@@ -323,6 +323,16 @@ export function resolveAntigravityPlaceholder(placeholder: string | null): strin
   return readLearnedPlaceholderMap().get(placeholder) || null;
 }
 
+// The raw UI selection, resolved or not: a selection that cannot be resolved
+// must clear an older model instead of leaving it on display.
+export function readAntigravityStatePlaceholder(): string | null {
+  try {
+    return parseAntigravityStatePlaceholder(fs.readFileSync(getAntigravityStateFile(), 'utf8'));
+  } catch (_) {
+    return null;
+  }
+}
+
 export function parseAntigravityStateModel(text: string): string | null {
   return resolveAntigravityPlaceholder(parseAntigravityStatePlaceholder(text));
 }

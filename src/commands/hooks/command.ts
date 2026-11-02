@@ -113,17 +113,24 @@ function runSetup(installers: readonly HookInstaller[], context: HooksCommandCon
   const scriptPath = context.getRuntimeScriptPath();
   const notes = new Set<string>();
 
-  for (const installer of installers) {
-    const result = installer.install(scriptPath);
-    console.log(
-      `${pc.green(`✔ Installed ${result.installed}`)} ${context.appTitle} ${installer.label} hook(s) in ${pc.cyan(result.target)}.`
-    );
-    if (result.removed) {
-      console.log(pc.yellow(`  Replaced ${result.removed} existing ${context.appTitle} ${installer.label} hook(s).`));
+  try {
+    for (const installer of installers) {
+      const result = installer.install(scriptPath);
+      console.log(
+        `${pc.green(`✔ Installed ${result.installed}`)} ${context.appTitle} ${installer.label} hook(s) in ${pc.cyan(result.target)}.`
+      );
+      if (result.removed) {
+        console.log(pc.yellow(`  Replaced ${result.removed} existing ${context.appTitle} ${installer.label} hook(s).`));
+      }
+      for (const note of installer.notes ?? []) {
+        notes.add(note);
+      }
     }
-    for (const note of installer.notes ?? []) {
-      notes.add(note);
-    }
+  } catch (error) {
+    // A refused install (e.g. an unparseable hooks.json) must not leave the
+    // daemon stopped by the runtime copy above.
+    reportDaemonRestart(context.restartDaemon());
+    throw error;
   }
 
   for (const note of notes) {
