@@ -71,7 +71,7 @@ The screenshots are real Discord captures (Windows 11, November 2026).
 | Need | Notes |
 | --- | --- |
 | Discord **Desktop** app, signed in | The browser version of Discord cannot receive activity. |
-| Node.js 20 or newer | Node.js 22.13+ (or 24) is recommended: Cursor's model, and the Antigravity fallback, are read with Node's built-in SQLite. |
+| Node.js 20 or newer | Install the **LTS** version from <https://nodejs.org>; it includes `npx`. Node.js 22.13+ is recommended: Cursor's model, and the Antigravity fallback, are read with Node's built-in SQLite. |
 | Windows 10/11 | Tested here: every tool above, start-at-login, window-focus switching. |
 | macOS | Start-at-login and hooks come from the original project and are not re-tested. Antigravity's model list and Claude Desktop's model button are read on Windows only. |
 | Linux | Not supported by `setup`, `uninstall` or start-at-login, and untested. |
@@ -81,9 +81,16 @@ In Discord, open **User Settings → Activity Privacy** and turn on sharing your
 
 ## Install
 
+Open a terminal (Windows: PowerShell or Command Prompt; macOS: Terminal) and run the command below.
+If you just installed Node.js, close and reopen the terminal first.
+
 ```sh
 npx @u2n4/discord-coding-status@latest setup
 ```
+
+> [!TIP]
+> On Windows, if PowerShell answers *running scripts is disabled on this system*, run
+> `npx.cmd @u2n4/discord-coding-status@latest setup` instead, or use Command Prompt.
 
 That one command downloads the program from npm and runs `setup`, which:
 
@@ -118,6 +125,11 @@ Discord shows one activity at a time, so when several tools are open:
    running.
 
 ## Check that it works
+
+Open a supported tool and send it a prompt, then click your avatar in Discord: your profile shows
+the tool and its model, for example `Playing Codex` / `Model: GPT-6.1 Sol`.
+
+From the terminal:
 
 ```sh
 npx @u2n4/discord-coding-status status
@@ -156,6 +168,8 @@ keeps your settings.
 
 | Problem | Fix |
 | --- | --- |
+| PowerShell: *running scripts is disabled on this system* | Write `npx.cmd` instead of `npx` at the start of the command, or use Command Prompt. |
+| `npx` is not recognized | Install Node.js LTS from <https://nodejs.org>, then close and reopen the terminal. |
 | Nothing on Discord | Use the Discord Desktop app, not the browser, and turn on activity sharing in User Settings → Activity Privacy. |
 | The card shows the tool but no model | The model could not be proven yet. Send one prompt in that tool, or pick a model in its picker. |
 | Codex updates are late | Run `/hooks` in Codex and trust the Discord Coding Status hooks. |
