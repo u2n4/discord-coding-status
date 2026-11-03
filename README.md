@@ -192,17 +192,22 @@ Playing <App>          <- Discord application identity per tool
 Model: <app label>     <- details line, or absent when the model is unknown
 ```
 
-Real captures from a Discord profile (Windows, 2026-11-03):
+Real captures from a Discord profile (Windows, 2026-11-03, native-resolution screen copies):
+
+<p align="center">
+  <img src="./docs/screenshots/gallery.png" width="760" alt="Discord activity cards: ClaudeCode Opus 5.5, Codex GPT-6.1 Sol, Codex GPT-6.2-Astra, Antigravity Gemini 4 Argon, Cursor AI Composer 2.5, Grok Code Grok 4.7, Muse Code Muse Spark 1.3, Open Code Hy4 preview">
+</p>
 
 | Tool | In Discord |
 | --- | --- |
-| Claude Code / Claude Desktop | <img src="./docs/screenshots/claude.jpg" width="300" alt="ClaudeCode, Model: Opus 5.5"> |
-| Codex (Desktop app) | <img src="./docs/screenshots/codex.jpg" width="300" alt="Codex, Model: GPT-6.1 Sol"> |
-| Antigravity | <img src="./docs/screenshots/antigravity.jpg" width="300" alt="Antigravity, Model: Gemini 4 Argon"> |
-| Cursor | <img src="./docs/screenshots/cursor.jpg" width="300" alt="Cursor AI, Model: Composer 2.5"> |
-| Grok Code | <img src="./docs/screenshots/grok.jpg" width="300" alt="Grok Code, Model: Grok 4.7"> |
-| Muse Code | <img src="./docs/screenshots/muse.jpg" width="300" alt="Muse Code, Model: Muse Spark 1.3"> |
-| OpenCode | <img src="./docs/screenshots/opencode.jpg" width="300" alt="Open Code, Model: Hy4 preview"> |
+| Claude Code / Claude Desktop | <img src="./docs/screenshots/claude.png" width="360" alt="ClaudeCode, Model: Opus 5.5"> |
+| Codex Desktop app | <img src="./docs/screenshots/codex.png" width="360" alt="Codex, Model: GPT-6.1 Sol"> |
+| Codex CLI (`codex --model gpt-6.2-astra`) | <img src="./docs/screenshots/codex-cli.png" width="360" alt="Codex, Model: GPT-6.2-Astra"> |
+| Antigravity | <img src="./docs/screenshots/antigravity.png" width="360" alt="Antigravity, Model: Gemini 4 Argon"> |
+| Cursor | <img src="./docs/screenshots/cursor.png" width="360" alt="Cursor AI, Model: Composer 2.5"> |
+| Grok Code | <img src="./docs/screenshots/grok.png" width="360" alt="Grok Code, Model: Grok 4.7"> |
+| Muse Code | <img src="./docs/screenshots/muse.png" width="360" alt="Muse Code, Model: Muse Spark 1.3"> |
+| OpenCode | <img src="./docs/screenshots/opencode.png" width="360" alt="Open Code, Model: Hy4 preview"> |
 
 Where each model comes from (every source is the tool's own data, so a newly released model shows up without updating this project):
 
@@ -210,7 +215,7 @@ Where each model comes from (every source is the tool's own data, so a newly rel
 | --- | --- | --- |
 | Claude Code | Hook input / transcript | `claude-opus-5-5` → "Opus 5.5" |
 | Claude Desktop | Model selector (UI Automation); Code tab falls back to its own Claude Code runners (`--model`, `--resume` session hooks) when they all agree | As the app writes it |
-| Codex CLI | Hook model, else the live process's `--model` / `-m` / `-c model=` flag, else `config.toml` (a `/model` switch after launch wins) | `models_cache.json` `display_name` ("GPT-6.1-Sol"); unlisted `gpt-*` slugs in the same style |
+| Codex CLI | Hook model (headless `codex exec` runs are ignored), else the live process's `--model` / `-m` / `-c model=` flag, else `config.toml` (a `/model` switch after launch wins); an idle CLI still counts while its terminal is in front | `models_cache.json` `display_name` ("GPT-6.1-Sol"); unlisted `gpt-*` slugs in the same style |
 | Codex Desktop | Hook model, else the latest composer pick | "GPT-6.1 Sol" |
 | Antigravity | Picker placeholder resolved through Antigravity's own language server list (`GetCascadeModelConfigData`), cached | "Gemini 4 Argon" (effort dropped) |
 | Antigravity CLI (`agy`) | Last model line in `cli.log` | As `agy models` lists it |
