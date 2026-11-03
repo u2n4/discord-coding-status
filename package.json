@@ -1,6 +1,6 @@
 {
   "name": "@u2n4/discord-coding-status",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Shows the AI coding tool you are using, and its model, in your Discord status (Claude, Codex, Antigravity, Cursor, Grok, Muse, OpenCode).",
   "author": "u2n4 (originally by howznguyen)",
   "main": "dist/cli.js",
