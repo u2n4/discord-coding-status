@@ -4,6 +4,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+import { readAntigravityLiveLabel } from './live-labels';
+
 export interface AntigravityModelResult {
   model: string;
   filePath: string;
@@ -316,11 +318,13 @@ export function parseAntigravityStatePlaceholder(text: string): string | null {
   return match?.[1]?.trim() || null;
 }
 
+// The picker's own label (live-labels.ts) wins; generation records and the
+// seed cover the time before the language server has answered once.
 export function resolveAntigravityPlaceholder(placeholder: string | null): string | null {
   if (!placeholder) {
     return null;
   }
-  return readLearnedPlaceholderMap().get(placeholder) || null;
+  return readAntigravityLiveLabel(placeholder) || readLearnedPlaceholderMap().get(placeholder) || null;
 }
 
 // The raw UI selection, resolved or not: a selection that cannot be resolved
