@@ -4,7 +4,8 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-  detectActiveTools
+  detectActiveTools,
+  processTreePids
 } from './core/detection/active-tools';
 import {
   rememberLastFocusedFamily
@@ -853,18 +854,22 @@ function scheduleClaudeDesktopRestart(expectedPid: number): void {
 async function runFastPass(generation: number): Promise<void> {
   const stateTools = detectStateTools();
   const cachedSnapshot = getCachedProcessList();
-  const processTools = PROCESS_DETECTION_ENABLED
+  // A CLI idle for minutes is still in use while its terminal is in front.
+  const watcherPid = PROCESS_DETECTION_ENABLED ? getWatcherForegroundPid() : null;
+  const detectProcessTools = (focusPid: number | null | undefined) => (PROCESS_DETECTION_ENABLED
     ? detectActiveTools(cachedSnapshot, toolProviders, {
       preferredSurfaceByFamily: PREFER_CODEX_CLI ? { codex: 'cli' } : {},
       idleGraceMs: PROCESS_IDLE_GRACE_MS,
-      activeCpuMs: PROCESS_ACTIVE_CPU_MS
+      activeCpuMs: PROCESS_ACTIVE_CPU_MS,
+      focusedPids: processTreePids(focusPid, cachedSnapshot)
     })
-    : [];
+    : []);
+  let processTools = detectProcessTools(watcherPid);
   debugLog(`Fast pass ${generation} found ${stateTools.length} state tool(s) and ${processTools.length} process tool(s).`);
   noteAiActivity(stateTools.length > 0 || processTools.length > 0);
-  const merged = mergeActiveTools(stateTools, processTools);
-  const displayable = merged.filter((tool) => clientIdForTool(tool));
-  const aliveFamilies = new Set(displayable.map((tool) => toolFamilyForTool(tool)));
+  let merged = mergeActiveTools(stateTools, processTools);
+  let displayable = merged.filter((tool) => clientIdForTool(tool));
+  let aliveFamilies = new Set(displayable.map((tool) => toolFamilyForTool(tool)));
 
   // Foreground attribution runs whenever at least one displayable tool is
   // alive (Desktop binding, Muse instance and last-focused retention need it
@@ -879,7 +884,12 @@ async function runFastPass(generation: number): Promise<void> {
   let competingForegroundPid: number | null | undefined = undefined;
   let currentForegroundFamily: string | null = null;
   let currentForegroundSurface: ForegroundSurface | null = null;
-  if (PROCESS_DETECTION_ENABLED && displayable.length >= 1) {
+  // With the watcher silent, an idle CLI may be the only tool and was just
+  // filtered out; the one-shot below can bring it back. Only when some AI tool
+  // process exists, so an idle machine never pays for the lookup.
+  const idleToolMayBeFocused = displayable.length === 0 && watcherPid === undefined && PROCESS_DETECTION_ENABLED
+    && cachedSnapshot.some((proc) => toolProviders.some((provider) => provider.presence && provider.process?.matches(proc)));
+  if (PROCESS_DETECTION_ENABLED && (displayable.length >= 1 || idleToolMayBeFocused)) {
     let foregroundPid = getWatcherForegroundPid();
 
     if (foregroundPid === undefined) {
@@ -889,6 +899,14 @@ async function runFastPass(generation: number): Promise<void> {
         foregroundPid = await getForegroundPid();
       } catch (_) {
         foregroundPid = null;
+      }
+      if (typeof foregroundPid === 'number' && foregroundPid > 0) {
+        // The watcher had no answer when detection ran: redo it with the
+        // one-shot foreground so an idle focused CLI is not lost.
+        processTools = detectProcessTools(foregroundPid);
+        merged = mergeActiveTools(stateTools, processTools);
+        displayable = merged.filter((tool) => clientIdForTool(tool));
+        aliveFamilies = new Set(displayable.map((tool) => toolFamilyForTool(tool)));
       }
     }
 

@@ -220,6 +220,82 @@ test('Claude Desktop falls back to its Code-tab runners only when they agree', (
   assert.equal(readDesktopHostedClaudeModel(desktopPid, [{ ...runner(1, ''), commandLine: `"${exe}" --type=renderer` }]), null);
 });
 
+test('an idle CLI under the focused window still counts as active and wins its provider', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1_793_700_000_000 });
+  const { detectActiveTools, processTreePids } = require('../dist/core/detection/active-tools');
+  const { toolProviders } = require('../dist/providers/registry');
+  const started = Date.now() - 3_600_000;
+  const shell = { pid: 48352, ppid: 12936, line: 'pwsh.exe', executablePath: 'C:\\pwsh\\pwsh.exe', cpuMs: 10, createdAtMs: started };
+  const node = { pid: 48612, ppid: 48352, line: 'node.exe codex.js', executablePath: 'C:\\node\\node.exe', cpuMs: 10, createdAtMs: started + 1_000 };
+  const codex = { pid: 50644, ppid: 48612, line: 'C:\\npm\\codex.exe --model gpt-6.2-astra', executablePath: 'C:\\npm\\codex.exe', commandLine: '"C:\\npm\\codex.exe" --model gpt-6.2-astra', cpuMs: 10, createdAtMs: started + 2_000 };
+  const busy = { pid: 60000, ppid: 1, line: 'C:\\npm\\codex.exe', executablePath: 'C:\\npm\\codex.exe', commandLine: '"C:\\npm\\codex.exe"', cpuMs: 10, createdAtMs: started };
+  const options = (extra = {}) => ({ idleGraceMs: 5 * 60_000, activeCpuMs: 50, ...extra });
+  const codexCli = (tools) => tools.find((tool) => tool.providerId === 'codexCli');
+
+  assert.deepEqual([...processTreePids(48352, [shell, node, codex])].sort(), [48352, 48612, 50644]);
+  // Seed the CPU tracker, then go idle past the five-minute grace.
+  detectActiveTools([shell, node, codex], toolProviders, options());
+  t.mock.timers.tick(6 * 60_000);
+  assert.equal(codexCli(detectActiveTools([shell, node, codex], toolProviders, options())), undefined, 'idle and unfocused: dropped');
+  const focus = processTreePids(48352, [shell, node, codex]);
+  assert.equal(codexCli(detectActiveTools([shell, node, codex], toolProviders, options({ focusedPids: focus })))?.processInfo.pid, 50644);
+
+  // A busy background instance of the same CLI never takes over the focused one.
+  t.mock.timers.tick(10_000);
+  const working = { ...busy, cpuMs: 5_000 };
+  assert.equal(codexCli(detectActiveTools([shell, node, codex, working], toolProviders, options({ focusedPids: focus })))?.processInfo.pid, 50644);
+  // Losing focus drops the idle one again; the busy one remains.
+  assert.equal(codexCli(detectActiveTools([shell, node, codex, { ...working, cpuMs: 9_000 }], toolProviders, options()))?.processInfo.pid, 60000);
+});
+
+test('the focused process tree rejects reused parent pids and unknown roots', () => {
+  const { processTreePids } = require('../dist/core/detection/active-tools');
+  const shell = { pid: 100, ppid: 1, line: 'pwsh.exe', createdAtMs: 2_000 };
+  const own = { pid: 101, ppid: 100, line: 'codex.exe', createdAtMs: 3_000 };
+  // Older than pid 100's current owner: its real parent exited long ago.
+  const orphan = { pid: 102, ppid: 100, line: 'codex.exe', createdAtMs: 1_000 };
+  const cycleA = { pid: 200, ppid: 201, line: 'a' };
+  const cycleB = { pid: 201, ppid: 200, line: 'b' };
+  assert.deepEqual([...processTreePids(100, [shell, own, orphan])].sort(), [100, 101]);
+  assert.deepEqual([...processTreePids(999, [shell, own])], []);
+  assert.deepEqual([...processTreePids(200, [cycleA, cycleB])].sort(), [200, 201]);
+  assert.deepEqual([...processTreePids(null, [shell])], []);
+});
+
+test('a headless codex exec rollout is recognised from its session_meta', () => {
+  const { readCodexSessionSource } = require('../dist/state-store');
+  const rollout = (source) => {
+    const file = path.join(root, `rollout-${source}.jsonl`);
+    writeJson(file, `${JSON.stringify({ timestamp: '2026-11-03T11:25:42Z', type: 'session_meta', payload: { id: 'x', originator: source === 'exec' ? 'codex_exec' : 'codex_cli_rs', source } })}\n${JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-6.1-sol' } })}\n`);
+    return file;
+  };
+  assert.equal(readCodexSessionSource(rollout('exec')), 'exec');
+  // Real session_meta lines hold the whole base instructions (well past 64 KiB).
+  const big = path.join(root, 'rollout-big.jsonl');
+  writeJson(big, `${JSON.stringify({ type: 'session_meta', payload: { base_instructions: { text: 'x'.repeat(700_000) }, source: 'exec' } })}\n{}\n`);
+  assert.equal(readCodexSessionSource(big), 'exec');
+  assert.equal(readCodexSessionSource(rollout('cli')), 'cli');
+  assert.equal(readCodexSessionSource(path.join(root, 'missing.jsonl')), null);
+  assert.equal(readCodexSessionSource(null), null);
+});
+
+test('codex-hook records an interactive session but never a headless exec run', async (t) => {
+  const { createTestEnvironment, runCli } = require('./helpers');
+  const { env, stateFile } = createTestEnvironment(t);
+  const fire = (id, source) => {
+    const transcript = path.join(root, `hook-${id}.jsonl`);
+    writeJson(transcript, `${JSON.stringify({ type: 'session_meta', payload: { id, source } })}\n`);
+    return runCli(['codex-hook', '--event', 'UserPromptSubmit'], env, 15000, JSON.stringify({
+      hook_event_name: 'UserPromptSubmit', session_id: id, cwd: root, transcript_path: transcript, model: 'gpt-6.1-sol', prompt: 'p'
+    }));
+  };
+  await fire('exec-run', 'exec');
+  await fire('tui-run', 'cli');
+  const sessions = JSON.parse(fs.readFileSync(stateFile, 'utf8')).sessions;
+  assert.equal(Boolean(sessions['exec-run']), false);
+  assert.equal(sessions['tui-run']?.model, 'gpt-6.1-sol');
+});
+
 test('the Claude Desktop new-chat draft hook is not a session', () => {
   const { detectStateTools } = require('../dist/presence');
   writeJson(process.env.DISCORD_CODING_STATUS_STATE_FILE, {

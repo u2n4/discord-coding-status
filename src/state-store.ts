@@ -247,6 +247,48 @@ export function findStringDeep(value: unknown, keys: string[], depth = 0): strin
   return null;
 }
 
+// The rollout's first line is session_meta; payload.source is "exec" for a
+// headless `codex exec` run (also "cli", "vscode", ...). That line carries the
+// full base instructions, so it is read whole (in chunks, up to a cap).
+const CODEX_SESSION_META_MAX_BYTES = 8 * 1024 * 1024;
+
+export function readCodexSessionSource(transcriptPath: string | null): string | null {
+  if (!transcriptPath) {
+    return null;
+  }
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(path.resolve(resolveHomePath(transcriptPath)), 'r');
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let lineEnd = -1;
+    while (lineEnd === -1 && total < CODEX_SESSION_META_MAX_BYTES) {
+      const chunk = Buffer.alloc(256 * 1024);
+      const read = fs.readSync(fd, chunk, 0, chunk.length, total);
+      if (read <= 0) {
+        break;
+      }
+      const piece = chunk.subarray(0, read);
+      const newline = piece.indexOf(0x0a);
+      lineEnd = newline === -1 ? -1 : total + newline;
+      chunks.push(piece);
+      total += read;
+    }
+    const head = Buffer.concat(chunks);
+    const first = JSON.parse(head.subarray(0, lineEnd === -1 ? head.length : lineEnd).toString('utf8')) as { type?: unknown; payload?: { source?: unknown } };
+    const source = first?.type === 'session_meta' ? first.payload?.source : null;
+    return typeof source === 'string' && source.trim() ? source.trim().toLowerCase() : null;
+  } catch (_) {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch (_) {}
+    }
+  }
+}
+
 export function readCodexTurnMetadata(transcriptPath: string | null): { model: string | null; effort: string | null } {
   const unavailable = { model: null, effort: null };
   if (!transcriptPath) {
@@ -686,7 +728,8 @@ export function codexHookSessionFromArgs(args: Record<string, string | boolean>)
 
   return {
     tool: 'codex',
-    surface: getArgString(args, 'surface') || 'cli',
+    // A headless `codex exec` run (scripts, agents) is nobody's screen.
+    surface: getArgString(args, 'surface') || (readCodexSessionSource(transcriptPath) === 'exec' ? 'exec' : 'cli'),
     status,
     session_id: sessionId,
     cwd,

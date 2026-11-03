@@ -9,6 +9,11 @@ export interface DetectActiveToolsOptions {
   idleGraceMs?: number;
   /** Minimum CPU time (ms) consumed between polls that marks a process active. */
   activeCpuMs?: number;
+  /**
+   * PIDs running under the focused window. They count as active however long
+   * they have been idle: a CLI the user is looking at is in use.
+   */
+  focusedPids?: ReadonlySet<number>;
 }
 
 const DEFAULT_IDLE_GRACE_MS = 5 * 60_000;
@@ -123,6 +128,50 @@ function activityOrder(candidate: ProcessInfo, activity: Map<number, ProcessActi
   return activity.get(candidate.pid)?.lastActiveAt ?? now;
 }
 
+/**
+ * The process and its descendants (bounded depth), from a census snapshot.
+ * The root must be in the snapshot, and a child older than its recorded
+ * parent is skipped: its real parent exited and the pid was reused.
+ */
+export function processTreePids(rootPid: number | null | undefined, processes: readonly ProcessInfo[], maxDepth = 8): Set<number> {
+  const pids = new Set<number>();
+  if (typeof rootPid !== 'number' || rootPid <= 0) {
+    return pids;
+  }
+  const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
+  if (!byPid.has(rootPid)) {
+    return pids;
+  }
+  const children = new Map<number, number[]>();
+  for (const proc of processes) {
+    if (typeof proc.ppid !== 'number' || proc.ppid === proc.pid) {
+      continue;
+    }
+    const parentCreated = byPid.get(proc.ppid)?.createdAtMs;
+    if (typeof parentCreated === 'number' && typeof proc.createdAtMs === 'number' && proc.createdAtMs < parentCreated) {
+      continue;
+    }
+    const list = children.get(proc.ppid) || [];
+    list.push(proc.pid);
+    children.set(proc.ppid, list);
+  }
+  let frontier = [rootPid];
+  pids.add(rootPid);
+  for (let depth = 0; depth < maxDepth && frontier.length; depth += 1) {
+    const next: number[] = [];
+    for (const pid of frontier) {
+      for (const child of children.get(pid) || []) {
+        if (!pids.has(child)) {
+          pids.add(child);
+          next.push(child);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return pids;
+}
+
 export function detectActiveTools(
   processLines: ProcessInfo[],
   providers: readonly ToolProvider[],
@@ -138,9 +187,15 @@ export function detectActiveTools(
   // or a recent start) count as active sessions. When several processes of the
   // same tool are alive (for example multiple idle Pi sessions under Knowns),
   // prefer the most recently active one instead of an arbitrary first match.
+  const focused = options.focusedPids;
   const rankedCandidates = [...candidates]
-    .filter((candidate) => isRecentlyActive(activity.get(candidate.pid), now, idleGraceMs))
+    .filter((candidate) => focused?.has(candidate.pid) || isRecentlyActive(activity.get(candidate.pid), now, idleGraceMs))
     .sort((left, right) => {
+      // The instance under the focused window is the one the user is using.
+      const focusDelta = Number(Boolean(focused?.has(right.pid))) - Number(Boolean(focused?.has(left.pid)));
+      if (focusDelta !== 0) {
+        return focusDelta;
+      }
       const orderDelta = activityOrder(right, activity, now) - activityOrder(left, activity, now);
       if (orderDelta !== 0) {
         return orderDelta;

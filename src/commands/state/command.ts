@@ -42,7 +42,11 @@ export function runStateCommand(
 
   if (command === 'codex-hook') {
     const session = context.getCodexSession(args);
-    context.upsertState(session);
+    // Headless `codex exec` runs never reach Discord: they would label the
+    // Codex CLI the user is actually looking at with an agent's model.
+    if (session.surface !== 'exec') {
+      context.upsertState(session);
+    }
     return true;
   }
 
