@@ -81,7 +81,7 @@ ${pc.bold('Project:')}
   License: ${accent(context.license)}
 
 ${pc.bold('Examples:')}
-  ${commandText('discord-coding-status setup')}
+  ${commandText('npx @u2n4/discord-coding-status@latest setup')}
   ${commandText('discord-coding-status setup --no-grok-hooks')}
   ${commandText('discord-coding-status hooks setup codex grok')}
   ${commandText('discord-coding-status hooks status')}

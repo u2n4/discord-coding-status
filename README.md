@@ -75,7 +75,6 @@ The screenshots are real Discord captures (Windows 11, November 2026).
 | Windows 10/11 | Tested here: every tool above, start-at-login, window-focus switching. |
 | macOS | Start-at-login and hooks come from the original project and are not re-tested. Antigravity's model list and Claude Desktop's model button are read on Windows only. |
 | Linux | Not supported by `setup`, `uninstall` or start-at-login, and untested. |
-| Git | To download the project. |
 
 In Discord, open **User Settings → Activity Privacy** and turn on sharing your activity, or nobody
 (including you) will see the card.
@@ -83,17 +82,10 @@ In Discord, open **User Settings → Activity Privacy** and turn on sharing your
 ## Install
 
 ```sh
-git clone https://github.com/u2n4/discord-coding-status.git
-cd discord-coding-status
-npm ci
-npm run build
-node dist/cli.js setup
+npx @u2n4/discord-coding-status@latest setup
 ```
 
-Run every `node dist/cli.js` command in this guide from that `discord-coding-status` folder, and keep
-the folder: you use it to update or uninstall.
-
-`setup`:
+That one command downloads the program from npm and runs `setup`, which:
 
 1. finds the AI tools you have installed;
 2. copies a self-contained copy of the program into your user app-data folder;
@@ -111,7 +103,7 @@ Then:
 
 Hooks are optional. Every tool is also found from its running process; hooks just make updates
 instant. Skip or force one tool's hooks with `--no-<tool>-hooks` or `--<tool>-hooks`, for example
-`node dist/cli.js setup --no-grok-hooks`.
+`npx @u2n4/discord-coding-status setup --no-grok-hooks`.
 
 ## How it chooses what to show
 
@@ -128,19 +120,12 @@ Discord shows one activity at a time, so when several tools are open:
 ## Check that it works
 
 ```sh
-node dist/cli.js status
-node dist/cli.js hooks status
+npx @u2n4/discord-coding-status status
+npx @u2n4/discord-coding-status hooks status
 ```
 
 `status` shows the background service and the tools it found. `hooks status` prints, as JSON, which
 hooks are installed for each tool.
-
-This prints, for each running tool, the line it would put on Discord (it does not read Claude
-Desktop's model button, so that app can show without a model here while Discord shows it):
-
-```sh
-node scripts/diagnose-presence.js
-```
 
 ## Configuration
 
@@ -161,10 +146,10 @@ from). Built-in applications are included for every tool; to use your own, creat
 | `codexClientId`, `claudeClientId`, `antigravityClientId`, `cursorClientId`, `grokClientId`, `museClientId`, `opencodeClientId`, `piClientId` | built in | The Discord application shown for that tool. |
 | `stateFile` | `~/discord-coding-status/states.json` | Where hook sessions are stored. |
 
-Or run `node dist/cli.js config`: it asks for each value, showing the built-in one. Enter keeps a
+Or run `npx @u2n4/discord-coding-status config`: it asks for each value, showing the built-in one. Enter keeps a
 value, `-` clears your override.
 
-After editing the file, run `node dist/cli.js setup` again: it restarts the background program and
+After editing the file, run `npx @u2n4/discord-coding-status setup` again: it restarts the background program and
 keeps your settings.
 
 ## Troubleshooting
@@ -174,7 +159,7 @@ keeps your settings.
 | Nothing on Discord | Use the Discord Desktop app, not the browser, and turn on activity sharing in User Settings → Activity Privacy. |
 | The card shows the tool but no model | The model could not be proven yet. Send one prompt in that tool, or pick a model in its picker. |
 | Codex updates are late | Run `/hooks` in Codex and trust the Discord Coding Status hooks. |
-| A tool never appears | Without hooks, a tool counts only while it is busy or its window is in front; send it a prompt. If you installed the tool after this program, run `node dist/cli.js setup` again to add its hooks. |
+| A tool never appears | Without hooks, a tool counts only while it is busy or its window is in front; send it a prompt. If you installed the tool after this program, run `npx @u2n4/discord-coding-status setup` again to add its hooks. |
 | Anything else | Read the logs (below), then open an issue with the last lines. |
 
 Logs:
@@ -190,12 +175,12 @@ Logs:
 These print in your terminal and never reach Discord:
 
 ```sh
-node dist/cli.js quota                # Codex plan and limits
-node dist/cli.js quota --tool claude  # Claude subscription limits
-node dist/cli.js quota --tool grok
-node dist/cli.js quota --tool cursor
-node dist/cli.js quota --tool opencode
-node dist/cli.js state                # stored hook sessions
+npx @u2n4/discord-coding-status quota                # Codex plan and limits
+npx @u2n4/discord-coding-status quota --tool claude  # Claude subscription limits
+npx @u2n4/discord-coding-status quota --tool grok
+npx @u2n4/discord-coding-status quota --tool cursor
+npx @u2n4/discord-coding-status quota --tool opencode
+npx @u2n4/discord-coding-status state                # stored hook sessions
 ```
 
 `quota` contacts the vendor's own usage endpoint with the login that tool already saved on your
@@ -206,10 +191,7 @@ computer. Nothing is sent anywhere else.
 ## Update
 
 ```sh
-git pull
-npm ci
-npm run build
-node dist/cli.js setup
+npx @u2n4/discord-coding-status@latest setup
 ```
 
 Your config and sessions are kept. If Codex says its hooks changed, trust them again with `/hooks`.
@@ -219,12 +201,12 @@ Your config and sessions are kept. If Codex says its hooks changed, trust them a
 Remove the hooks first, while the program they point to still exists:
 
 ```sh
-node dist/cli.js hooks uninstall
-node dist/cli.js uninstall --purge
+npx @u2n4/discord-coding-status hooks uninstall
+npx @u2n4/discord-coding-status uninstall --purge
 ```
 
-`uninstall` stops the background program and removes start-at-login and the copied program; then
-you can delete the folder. `--purge` also deletes `~/discord-coding-status/` (config and sessions).
+`uninstall` stops the background program and removes start-at-login and the copied program.
+`--purge` also deletes `~/discord-coding-status/` (config and sessions).
 Only the hooks this project added are removed and your own hooks and settings stay. Codex, Claude Code, Muse Code and Antigravity
 keep their previous file as a `.bak` copy; Grok Code's hooks live in a file of their own.
 
@@ -242,11 +224,22 @@ Report security problems as described in [SECURITY.md](./SECURITY.md).
 ## Development
 
 ```sh
+git clone https://github.com/u2n4/discord-coding-status.git
+cd discord-coding-status
 npm ci
+npm run build
+node dist/cli.js setup    # install your local build instead of the npm one
 npm test                  # build + full suite, no Discord needed
 npm run test:integration
 npm run test:stress
 ```
+
+`node scripts/diagnose-presence.js` prints, for each running tool, the line it would put on Discord
+(it does not read Claude Desktop's model button, so that app can show without a model there while
+Discord shows it).
+
+Releases: bump `version` in `package.json`, merge, then push a tag `v<version>`. The publish workflow
+tests the tag and publishes it to npm through npm trusted publishing (no token).
 
 Tests use a fake local Discord connection, so they run anywhere. CI runs Node.js 20 and 22 on Linux,
 and Node.js 22 on macOS and Windows.

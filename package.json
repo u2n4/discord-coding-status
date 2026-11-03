@@ -1,5 +1,5 @@
 {
-  "name": "discord-coding-status",
+  "name": "@u2n4/discord-coding-status",
   "version": "2.0.0",
   "description": "Shows the AI coding tool you are using, and its model, in your Discord status (Claude, Codex, Antigravity, Cursor, Grok, Muse, OpenCode).",
   "author": "u2n4 (originally by howznguyen)",
@@ -42,7 +42,13 @@
     "ai-coding",
     "startup",
     "launchagent",
-    "scheduled-task"
+    "scheduled-task",
+    "cursor",
+    "antigravity",
+    "grok",
+    "muse",
+    "opencode",
+    "ai-model"
   ],
   "repository": {
     "type": "git",
@@ -53,6 +59,9 @@
   },
   "homepage": "https://github.com/u2n4/discord-coding-status#readme",
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "discord-rpc": "^4.0.1",
     "picocolors": "^1.1.1"
