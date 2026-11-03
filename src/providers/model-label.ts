@@ -101,11 +101,24 @@ export function resetModelLabelCacheForTests(): void {
 
 // --- per tool ---------------------------------------------------------------
 
+const CODEX_GPT_SLUG = /^gpt-(\d+(?:\.\d+)?)((?:-[a-z]+)*)$/;
+
+function codexStyleLabel(id: string): string | null {
+  const match = id.match(CODEX_GPT_SLUG);
+  if (!match) {
+    return null;
+  }
+  const words = match[2].split('-').filter(Boolean).map(titleWord);
+  return ['GPT', match[1], ...words].join('-');
+}
+
 function codexLabel(id: string, providerId: string | undefined): string {
   // Codex CLI pickers show models_cache.json's display_name ("GPT-6.1-Sol");
   // the Desktop app separates the variant word ("GPT-6.1 Sol").
-  // A slug missing from that list is shown as-is rather than guessed.
-  const label = codexNames().get(id);
+  // A gpt-* slug missing from that list (a model newer than the cached list,
+  // or one passed with --model) is written the way the list writes its
+  // siblings: "gpt-6.2-astra" -> "GPT-6.2-Astra". Anything else is shown as-is.
+  const label = codexNames().get(id) || codexStyleLabel(id);
   if (!label) {
     return id;
   }

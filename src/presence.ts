@@ -39,15 +39,19 @@ import {
   toolProviders
 } from './providers/registry';
 import { discordApplicationForTool } from './providers/discord';
-import { readMuseExecModelForProcess } from './providers/muse/model';
-import { readCodexConfiguredModel, readCodexDesktopModel } from './providers/codex/model';
-import { readGrokSessionSummaryModel } from './providers/grok/model';
+import { readMuseExecModelForProcess, readMuseTuiModelForProcess } from './providers/muse/model';
+import { parseCodexCommandLineModel, readCodexConfiguredModel, readCodexDesktopModel } from './providers/codex/model';
+import { readGrokProcessModel, readGrokSessionSummaryModel } from './providers/grok/model';
+import { readOpenCodeModel } from './providers/opencode/model';
+import { readCursorModel } from './providers/cursor/model';
 import {
   readActiveAntigravityModel,
   readAntigravityCliModel,
   readAntigravityStatePlaceholder
 } from './providers/antigravity/model';
+import { ensureAntigravityLiveLabels } from './providers/antigravity/live-labels';
 import { displayModelLabel } from './providers/model-label';
+import { getCachedProcessList } from './adapters/system/process-cache';
 import type { ActiveTool, ProcessInfo } from './core/tools/types';
 import type {
   PackageInfo,
@@ -383,9 +387,13 @@ function countStateSessionsByFamily(sessions: HookSessionState[]): Map<string, n
   return counts;
 }
 
+// Claude Desktop runs hooks for its new-chat draft before any session exists
+// (session_id "empty-state-draft", model "default"); that is not a session.
+const CLAUDE_DESKTOP_DRAFT_SESSION_ID = 'empty-state-draft';
+
 export function detectStateTools(): ActiveTool[] {
   const state = cleanupStateSessions(readStateFile(), Date.now());
-  const sessions = Object.values(state.sessions);
+  const sessions = Object.values(state.sessions).filter((session) => session.session_id !== CLAUDE_DESKTOP_DRAFT_SESSION_ID);
   const activeClaudeSessionIds = new Set(
     sessions
       .filter((session) => ['claude', 'claude-code'].includes(session.tool.trim().toLowerCase()))
@@ -431,6 +439,96 @@ export function detectStateTools(): ActiveTool[] {
 
 export function detectStateTool(): ActiveTool | null {
   return detectStateTools()[0] || null;
+}
+
+const DESKTOP_HOSTED_MAX_AGE_MS = 30 * 60_000;
+
+function runnerFlag(commandLine: string, name: string): string | null {
+  const match = commandLine.match(new RegExp(`(?:^|\\s)--${name}(?:=|\\s+)("?)([A-Za-z0-9][A-Za-z0-9._:@\\[\\]-]{0,80})\\1(?=\\s|$)`));
+  return match ? match[2] : null;
+}
+
+// Topmost Claude.exe above a Desktop process (helpers are its children).
+export function claudeDesktopHostPid(proc: ProcessInfo, processes: ProcessInfo[]): number | null {
+  const byPid = new Map(processes.map((entry) => [entry.pid, entry]));
+  const exe = (entry: ProcessInfo | undefined) => String(entry?.executablePath || '').trim().toLowerCase();
+  let current: ProcessInfo | undefined = byPid.get(proc.pid) || proc;
+  const own = exe(current);
+  if (!/(?:^|[\\/])claude\.exe$/.test(own)) {
+    return null;
+  }
+  for (let hops = 0; hops < 4; hops += 1) {
+    const parent: ProcessInfo | undefined = typeof current?.ppid === 'number' ? byPid.get(current.ppid) : undefined;
+    if (!parent || exe(parent) !== own) {
+      break;
+    }
+    current = parent;
+  }
+  return current?.pid || null;
+}
+
+/**
+ * Model of Claude Desktop's Code tab, shown when the window's own label cannot
+ * be read. Every Code-tab session runs as a `claude --output-format
+ * stream-json --model=<id> [--resume=<session>]` child of the Desktop
+ * process. Each live runner's model is its bound hook session's model (the
+ * session id it resumes, or the one unbound Code-tab hook session when exactly
+ * one runner is unbound; /model switches arrive there), else its --model flag.
+ * A value is returned only when every live runner agrees, so a background
+ * tab with another model never labels the one on screen; a terminal Claude
+ * Code session (entrypoint "cli") is never consulted.
+ */
+export function readDesktopHostedClaudeModel(desktopPid: number, processes: ProcessInfo[]): string | null {
+  const runners = processes.filter((proc) => proc.ppid === desktopPid
+    && /(?:^|[\\/])claude(?:\.exe)?$/i.test(String(proc.executablePath || '').trim())
+    && /--output-format[=\s]+stream-json/.test(String(proc.commandLine || '')));
+  if (!runners.length) {
+    return null;
+  }
+  const now = Date.now();
+  const sessions = new Map<string, HookSessionState>();
+  for (const session of Object.values(cleanupStateSessions(readStateFile(), now).sessions)) {
+    if (['claude', 'claude-code'].includes(session.tool.trim().toLowerCase())
+      && session.claude_entrypoint === 'claude-desktop'
+      && typeof session.model === 'string' && session.model.trim()
+      && now - session.updated_at <= DESKTOP_HOSTED_MAX_AGE_MS) {
+      sessions.set(session.session_id, session);
+    }
+  }
+
+  const bound = new Set<string>();
+  const unbound: Array<{ flag: string | null; resume: string | null; createdAtMs: number }> = [];
+  const models = new Set<string>();
+  for (const runner of runners) {
+    const commandLine = String(runner.commandLine || '');
+    const flag = runnerFlag(commandLine, 'model');
+    const resume = runnerFlag(commandLine, 'resume');
+    const session = resume ? sessions.get(resume) : undefined;
+    // A hook written before this runner started belongs to an earlier one.
+    if (session && (!runner.createdAtMs || session.updated_at >= runner.createdAtMs)) {
+      bound.add(session.session_id);
+      models.add(session.model as string);
+    } else {
+      unbound.push({ flag, resume, createdAtMs: runner.createdAtMs || 0 });
+    }
+  }
+  const spare = [...sessions.values()].filter((session) => !bound.has(session.session_id));
+  for (const runner of unbound) {
+    // Only a new session (no --resume) can be paired by elimination; a runner
+    // resuming a known id never takes another session's hook.
+    const session = !runner.resume && unbound.length === 1 && spare.length === 1 && spare[0].updated_at >= runner.createdAtMs
+      ? spare[0]
+      : null;
+    const model = session?.model || runner.flag;
+    if (!model) {
+      return null;
+    }
+    models.add(model);
+  }
+  if (models.size !== 1) {
+    return null;
+  }
+  return truncatePresenceText(displayModelLabel('claude', [...models][0]));
 }
 
 /**
@@ -568,7 +666,17 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
   // Model fallbacks below only fill a gap or follow a newer persisted pick
   // that belongs to the same surface. Global guesses (Muse settings.json, the
   // Grok config default) are never shown: unknown stays app-only.
-  if (tool.family === 'codex') {
+  if (tool.family === 'claude' && tool.providerId === 'claudeApp' && !model && tool.processInfo) {
+    // Desktop not in front (its window label is unread): its Code-tab runners
+    // still name the model when they agree. The detected Claude.exe may be a
+    // helper process, so the runners are looked up under its topmost Claude.exe.
+    const processes = getCachedProcessList();
+    const hostPid = claudeDesktopHostPid(tool.processInfo, processes);
+    const hosted = hostPid ? readDesktopHostedClaudeModel(hostPid, processes) : null;
+    if (hosted) {
+      model = hosted;
+    }
+  } else if (tool.family === 'codex') {
     if (tool.providerId === 'codexApp') {
       const desktop = readCodexDesktopModel();
       if (desktop?.model && !model && isVerifiedLiveProcess(tool.processInfo)) {
@@ -579,8 +687,18 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
       if (configured?.model) {
         if (tool.source === 'hook' && (!model || (updatedAtMs > 0 && configured.mtimeMs > updatedAtMs))) {
           model = truncatePresenceText(configured.model);
-        } else if (tool.source === 'process' && !model && isVerifiedLiveProcess(tool.processInfo)) {
-          model = truncatePresenceText(configured.model);
+        }
+      }
+      if (tool.source === 'process' && !model && isVerifiedLiveProcess(tool.processInfo)) {
+        // `codex --model x` runs x whatever config.toml says; a model value
+        // change seen in config.toml after the process started is a /model
+        // switch inside it.
+        const flagged = parseCodexCommandLineModel(tool.processInfo?.commandLine || tool.processInfo?.line);
+        const startedAtMs = tool.processInfo?.createdAtMs || 0;
+        const configChangedSinceStart = Boolean(configured?.model && startedAtMs > 0 && configured.observedChangeAtMs > startedAtMs);
+        const picked = flagged && !configChangedSinceStart ? flagged : configured?.model;
+        if (picked) {
+          model = truncatePresenceText(picked);
         }
       }
     }
@@ -590,18 +708,36 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
       if (summary?.model && (!model || (updatedAtMs > 0 && summary.mtimeMs > updatedAtMs))) {
         model = truncatePresenceText(summary.model);
       }
+    } else if (!model && tool.source === 'process') {
+      // No hook yet: ~/.grok/active_sessions.json binds this grok.exe to its session.
+      const bound = readGrokProcessModel(tool.processInfo?.pid);
+      if (bound?.model) {
+        model = truncatePresenceText(bound.model);
+      }
     }
   } else if (tool.family === 'muse') {
     if (!model && tool.source === 'process' && !tool.processAmbiguous && tool.processInfo) {
       let resolved: string | null = null;
       try {
-        resolved = readMuseExecModelForProcess(tool.processInfo)?.model || null;
+        resolved = readMuseExecModelForProcess(tool.processInfo)?.model
+          || readMuseTuiModelForProcess(tool.processInfo)?.model
+          || null;
       } catch (_) {
         resolved = null;
       }
       if (resolved) {
         model = truncatePresenceText(resolved);
       }
+    }
+  } else if (tool.family === 'opencode') {
+    if (!model) {
+      model = readOpenCodeModel()?.model || null;
+    }
+  } else if (tool.family === 'cursor' && tool.providerId === 'cursorApp') {
+    // The Agent pick lives in the Cursor app's settings; the Cursor CLI
+    // (cursor-agent) keeps its own and is not labelled from here.
+    if (!model) {
+      model = readCursorModel()?.model || null;
     }
   } else if (tool.family === 'antigravity' && tool.providerId === 'antigravityCli') {
     const cli = readAntigravityCliModel();
@@ -611,10 +747,12 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
   } else if (tool.family === 'antigravity') {
     // The UI selection is written to antigravity_state.pbtxt the moment it
     // changes, so a resolved selection is fresher than any hook payload.
+    const placeholder = readAntigravityStatePlaceholder();
+    ensureAntigravityLiveLabels(placeholder);
     const active = readActiveAntigravityModel();
     if (active?.model) {
       model = truncatePresenceText(active.model);
-    } else if (readAntigravityStatePlaceholder()) {
+    } else if (placeholder) {
       // A current selection we cannot prove beats any older hook model.
       model = null;
     }

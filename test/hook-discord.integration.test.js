@@ -167,11 +167,11 @@ test('Codex hook shows the raw model without reasoning effort', async (t) => {
   const activity = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.details === 'Model: gpt-5.6-sol'
+        && event.activity.details === 'Model: GPT-5.6-Sol'
     ),
     'the raw model to reach Discord RPC'
   );
-  assert.equal(activity.activity.details, 'Model: gpt-5.6-sol');
+  assert.equal(activity.activity.details, 'Model: GPT-5.6-Sol');
   assert.doesNotMatch(JSON.stringify(activity.activity), /xhigh/);
 
   const stateResult = await runCli(['state'], env);

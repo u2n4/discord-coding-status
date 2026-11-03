@@ -79,6 +79,7 @@ import {
   getAntigravityStateFile,
   readActiveAntigravityModel
 } from './providers/antigravity/model';
+import { onAntigravityLiveLabelsChanged } from './providers/antigravity/live-labels';
 import {
   APP_TITLE,
   DETAIL_LEVEL,
@@ -106,6 +107,7 @@ import {
   markShuttingDown,
   mergeActiveTools,
   readLiveMuseHookSessions,
+  readDesktopHostedClaudeModel,
   rpcConnections,
   selectNewestTool,
   setRpcReadyKick,
@@ -982,9 +984,15 @@ async function runFastPass(generation: number): Promise<void> {
       touchVerifiedClaudeDesktopModel(desktopFgPid);
       ensureClaudeDesktopModelTracker(desktopFgPid);
       const verified = getVerifiedDesktopModelForDisplay();
+      // The Code tab runs Claude Code as a child of this Desktop process; its
+      // hooks carry the model when the window's own label cannot be read.
+      const hosted = verified ? null : readDesktopHostedClaudeModel(desktopFgPid, getCachedProcessList());
       if (verified) {
         desktopLabelPending = null;
         desktopOverride = { kind: 'model', model: verified.model };
+      } else if (hosted) {
+        desktopLabelPending = null;
+        desktopOverride = { kind: 'model', model: hosted };
       } else {
         // Desktop foreground without a verified model: fail closed to
         // app-only so a stale background CLI label is never attached. The UIA
@@ -1322,6 +1330,7 @@ export function startDaemon(): void {
   }
   daemonRunning = true;
   enablePersistentProcessCensus(process.env.DISCORD_CODING_STATUS_PERSISTENT_CENSUS !== '0');
+  onAntigravityLiveLabelsChanged(() => requestFastUpdate('antigravity-labels'));
   log(`Starting ${APP_TITLE} daemon.`);
   log(`Presence detail level: ${DETAIL_LEVEL}.`);
   startPolling();

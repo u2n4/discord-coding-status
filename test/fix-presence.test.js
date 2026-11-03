@@ -230,7 +230,8 @@ test('model labels read like each app: Opus 5.5, Gemini 4 Argon, GPT-6.1 Sol', (
   assert.equal(displayModelLabel(app, 'gpt-6.1-sol'), 'GPT-6.1 Sol');
   assert.equal(displayModelLabel(cli, 'gpt-6.1-sol'), 'GPT-6.1-Sol');
   assert.equal(displayModelLabel(app, 'gpt-6.1-terra'), 'GPT-6.1 Terra');
-  assert.equal(displayModelLabel(app, 'gpt-7-nova'), 'gpt-7-nova', 'a slug missing from the Codex list is never guessed');
+  assert.equal(displayModelLabel(app, 'gpt-7-nova'), 'GPT-7 Nova', 'a gpt slug missing from the Codex list follows its naming style');
+  assert.equal(displayModelLabel(app, 'o9-mini'), 'o9-mini', 'a non-gpt slug missing from the list is shown as-is');
   assert.equal(displayModelLabel({ family: 'grok' }, 'grok-4.7'), 'Grok 4.7');
   assert.equal(displayModelLabel({ family: 'grok' }, 'grok-unknown'), 'grok-unknown');
   const cases = [

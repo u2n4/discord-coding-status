@@ -109,6 +109,34 @@ export function readGrokSessionSummaryModel(sessionId: string, cwd?: string | nu
   return null;
 }
 
+// Grok Build records every open TUI in ~/.grok/active_sessions.json as
+// { session_id, pid, cwd }, which binds a live grok.exe to its own session
+// summary (current_model_id follows /model switches).
+export function findGrokActiveSessionForPid(pid: number | null | undefined): { sessionId: string; cwd: string | null } | null {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(getGrokHomeDirectory(), 'active_sessions.json'), 'utf8'));
+    const matches = (Array.isArray(parsed) ? parsed : []).filter((entry) => entry?.pid === pid
+      && typeof entry?.session_id === 'string' && entry.session_id.trim());
+    if (matches.length !== 1) {
+      return null;
+    }
+    return {
+      sessionId: matches[0].session_id.trim(),
+      cwd: typeof matches[0].cwd === 'string' ? matches[0].cwd : null
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+export function readGrokProcessModel(pid: number | null | undefined): GrokResolvedModel | null {
+  const session = findGrokActiveSessionForPid(pid);
+  return session ? readGrokSessionSummaryModel(session.sessionId, session.cwd) : null;
+}
+
 export function parseGrokConfigTomlDefaultModel(content: string): string | null {
   const lines = content.split(/\r?\n/);
   let inModelsSection = false;

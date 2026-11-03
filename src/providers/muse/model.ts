@@ -588,6 +588,150 @@ export function readMuseExecModelForProcess(process: ProcessInfo): MuseModelResu
   return passing.length === 1 ? passing[0] : null;
 }
 
+// --- interactive Muse (TUI) ---------------------------------------------------
+// A TUI process writes no pid into its session, but Muse session ids are
+// UUIDv7, so the id carries the creation time in ms. The session a TUI opens
+// at startup is created within a second of the process (0.4 s measured); it
+// must be the only session created in that window (an exec run started
+// alongside makes it ambiguous, so nothing binds). Every prompt the TUI sends
+// is appended to tui-history.jsonl with its session id, which headless
+// `muse exec` runs never write. Once the startup session appears there, the
+// session of the LAST history entry from that point on is the one the user is
+// typing in (a /new or /resume shows up as a new id). History order, not file
+// mtime, decides, so another process writing an old session cannot take over.
+// Lookups go straight to each id's date folder; nothing is scanned.
+
+const TUI_STARTUP_WINDOW_MS = 3_000;
+const TUI_HISTORY_TAIL_BYTES = 128 * 1024;
+const TUI_CACHE_MS = 2_000;
+
+export function museSessionCreatedAtMs(sessionId: string): number | null {
+  if (!UUID_RE.test(sessionId) || sessionId[14] !== '7') {
+    return null;
+  }
+  const ms = parseInt(sessionId.replace(/-/g, '').slice(0, 12), 16);
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+// Muse names day folders by creation date; UTC and local dates are both
+// tried so a session made near midnight is still found.
+function museDayDirs(ms: number): string[] {
+  const root = museSessionsRoot();
+  const utc = new Date(ms);
+  const keys = new Set([
+    [utc.getUTCFullYear(), utc.getUTCMonth() + 1, utc.getUTCDate()],
+    [utc.getFullYear(), utc.getMonth() + 1, utc.getDate()]
+  ].map(([y, m, d]) => path.join(root, String(y), String(m).padStart(2, '0'), String(d).padStart(2, '0'))));
+  return [...keys];
+}
+
+function locateMuseSession(id: string): { file: string; mtimeMs: number } | null {
+  const created = museSessionCreatedAtMs(id);
+  if (created === null) {
+    return null;
+  }
+  for (const dir of museDayDirs(created)) {
+    const file = path.join(dir, id, 'session.jsonl');
+    try {
+      return { file, mtimeMs: fs.statSync(file).mtimeMs };
+    } catch (_) {}
+  }
+  return null;
+}
+
+// Session ids of tui-history.jsonl entries, oldest first.
+function readTuiHistorySessionOrder(maxBytes: number = TUI_HISTORY_TAIL_BYTES): { ids: string[]; complete: boolean; size: number } {
+  const ids: string[] = [];
+  const file = path.join(path.dirname(museSessionsRoot()), 'tui-history.jsonl');
+  let fd: number | null = null;
+  let complete = true;
+  let size = 0;
+  try {
+    size = fs.statSync(file).size;
+    const length = Math.min(size, maxBytes);
+    complete = length === size;
+    fd = fs.openSync(file, 'r');
+    const buffer = Buffer.alloc(length);
+    fs.readSync(fd, buffer, 0, length, size - length);
+    for (const match of buffer.toString('utf8').matchAll(/"session"\s*:\s*"([0-9a-f-]{36})"/gi)) {
+      ids.push(match[1].toLowerCase());
+    }
+  } catch (_) {
+    // No TUI history yet: only the startup session can bind.
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch (_) {}
+    }
+  }
+  return { ids, complete, size };
+}
+
+function startupSessions(createdAtMs: number): string[] {
+  const found = new Set<string>();
+  for (const dir of museDayDirs(createdAtMs)) {
+    for (const id of readSortedDesc(dir, /^[0-9a-f-]{36}$/i) ?? []) {
+      const created = museSessionCreatedAtMs(id);
+      if (created !== null && created >= createdAtMs - 1_000 && created <= createdAtMs + TUI_STARTUP_WINDOW_MS) {
+        found.add(id.toLowerCase());
+      }
+    }
+  }
+  return [...found];
+}
+
+const museTuiCache = new Map<string, { at: number; result: MuseModelResult | null }>();
+// Processes whose startup session has been seen in the history: once true it
+// stays true, so the anchor scrolling out of the read tail changes nothing.
+const museTuiAnchored = new Map<string, true>();
+const TUI_HISTORY_FULL_MAX_BYTES = 16 * 1024 * 1024;
+// History size at which a full read last missed the anchor: it is read again
+// only after the history grows (a new prompt), never on every pass.
+const museTuiFullMiss = new Map<string, number>();
+
+export function readMuseTuiModelForProcess(proc: ProcessInfo): MuseModelResult | null {
+  const pid = proc?.pid;
+  const createdAtMs = proc?.createdAtMs;
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0
+    || typeof createdAtMs !== 'number' || !Number.isFinite(createdAtMs) || createdAtMs <= 0) {
+    return null;
+  }
+  const tokens = splitMuseCommandLine(String(proc.commandLine || proc.line || ''));
+  if (extractMuseExecSessionId(proc) || tokens.slice(1).some((token) => token === 'exec' || token === '-p' || token === '--print')) {
+    return null;
+  }
+  const key = `${museSessionsRoot()}|${pid}|${createdAtMs}`;
+  const cached = museTuiCache.get(key);
+  if (cached && Date.now() - cached.at < TUI_CACHE_MS) {
+    return cached.result;
+  }
+
+  const startup = startupSessions(createdAtMs);
+  let onScreen: string | null = startup.length === 1 ? startup[0] : null;
+  if (onScreen) {
+    const tail = readTuiHistorySessionOrder();
+    let anchored = museTuiAnchored.has(key) || tail.ids.includes(onScreen);
+    if (!anchored && !tail.complete && museTuiFullMiss.get(key) !== tail.size) {
+      // The tail misses it; the whole history settles it (a daemon started
+      // long after the TUI).
+      anchored = readTuiHistorySessionOrder(TUI_HISTORY_FULL_MAX_BYTES).ids.includes(onScreen);
+      if (!anchored) {
+        setBounded(museTuiFullMiss, key, tail.size);
+      }
+    }
+    if (anchored) {
+      setBounded(museTuiAnchored, key, true);
+      onScreen = tail.ids[tail.ids.length - 1] || onScreen;
+    }
+  }
+  const located = onScreen ? locateMuseSession(onScreen) : null;
+  const model = located ? readMuseModelFromFile(located.file) : null;
+  const result: MuseModelResult | null = located && model ? { model, sessionFile: located.file } : null;
+  setBounded(museTuiCache, key, { at: Date.now(), result });
+  return result;
+}
+
 /** Session files have no process binding, so they cannot establish an active model. */
 export function readActiveMuseModel(_freshAfterMs: number): MuseModelResult | null {
   return null;

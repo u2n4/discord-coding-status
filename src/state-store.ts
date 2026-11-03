@@ -628,8 +628,14 @@ export function coerceHookSessionState(value: unknown): HookSessionState | null 
     museCreatedAtMs: typeof input.museCreatedAtMs === 'number' && Number.isFinite(input.museCreatedAtMs) && input.museCreatedAtMs > 0 ? input.museCreatedAtMs : undefined,
     claude_quota_eligible: typeof input.claude_quota_eligible === 'boolean'
       ? input.claude_quota_eligible
-      : undefined
+      : undefined,
+    claude_entrypoint: normalizeClaudeEntrypoint(input.claude_entrypoint)
   };
+}
+
+export function normalizeClaudeEntrypoint(value: unknown): string | undefined {
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return /^[a-z0-9_-]{1,40}$/.test(text) ? text : undefined;
 }
 
 export function sessionFromArgs(args: Record<string, string | boolean>): HookSessionState | null {
@@ -737,10 +743,12 @@ export function claudeHookSessionFromArgs(args: Record<string, string | boolean>
     || extractClaudeSessionId(input)
     || findStringDeep(input, ['conversation_id', 'conversationId', 'thread_id', 'threadId'])
     || `claude:cli:${cwd}:${process.ppid}`;
-  const model = getArgString(args, 'model')
-    || extractClaudeModelFromHookInput(input)
-    || readClaudeModelFromTranscript(transcriptPath)
-    || undefined;
+  // "default" is Claude Code's "use the account default" setting, not a model.
+  const model = [
+    getArgString(args, 'model'),
+    extractClaudeModelFromHookInput(input),
+    readClaudeModelFromTranscript(transcriptPath)
+  ].find((value) => typeof value === 'string' && value.trim() && value.trim().toLowerCase() !== 'default') || undefined;
   const quotaRequestOptions = claudeQuotaRequestOptions();
   const eligibility = evaluateClaudeQuotaEligibility(
     quotaRequestOptions.environment || process.env,
@@ -760,7 +768,8 @@ export function claudeHookSessionFromArgs(args: Record<string, string | boolean>
     activity: getArgString(args, 'activity') || activityFromClaudeHook(event, input) || undefined,
     model,
     context: getArgString(args, 'context') || undefined,
-    claude_quota_eligible: eligibility.eligible
+    claude_quota_eligible: eligibility.eligible,
+    claude_entrypoint: normalizeClaudeEntrypoint(process.env.CLAUDE_CODE_ENTRYPOINT)
   };
 }
 

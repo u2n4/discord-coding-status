@@ -277,7 +277,8 @@ test('5. Codex immediate model update from config.toml and .codex-global-state.j
     details: 'Using Codex',
     state: 'Codex'
   });
-  assert.equal(enriched.details, 'Model: gpt-5.4-mini');
+  // Missing from the Codex list: written in the CLI list's own style.
+  assert.equal(enriched.details, 'Model: GPT-5.4-Mini');
 });
 
 test('6. Grok session summary.json and Muse settings.json model resolution', async (t) => {

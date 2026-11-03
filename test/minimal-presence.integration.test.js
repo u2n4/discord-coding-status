@@ -41,7 +41,7 @@ test('enrich keeps only the Model line and drops effort with it', async () => {
     effort: 'xhigh'
   });
 
-  assert.equal(enriched.details, 'Model: gpt-5.6-sol');
+  assert.equal(enriched.details, 'Model: GPT-5.6-Sol');
   assert.equal(enriched.state, '');
   assert.doesNotMatch(`${enriched.details} ${enriched.state}`, /xhigh|Cooking|thinking/i);
 });
