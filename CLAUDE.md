@@ -1,6 +1,7 @@
-# discord-coding-status (Ali's minimal-display fork)
+# discord-coding-status (Ali's minimal-display build)
 
-Upstream: https://github.com/howznguyen/discord-coding-status (v1.6.1).
+Repo: https://github.com/u2n4/discord-coding-status (standalone since 2026-11-03).
+Originally based on https://github.com/howznguyen/discord-coding-status (v1.6.1, MIT; credit stays in LICENSE).
 
 ## Display contract (do not weaken)
 
@@ -26,15 +27,17 @@ unknown model = application name only.
 
 | Tool | Active detection | Model source |
 |---|---|---|
-| Codex CLI | Lifecycle hooks + process | Hook input / transcript `turn_context`; `config.toml` top-level `model` when newer than the hook (a `/model` change) or when the hook has none |
+| Codex CLI | Lifecycle hooks + process | Hook input / transcript `turn_context`; `config.toml` top-level `model` when newer than the hook (a `/model` change) or when the hook has none. Process-only: the live process's `--model`/`-m`/`-c model=` flag, unless the config's model value was seen changing after the process started. Unlisted `gpt-*` slugs are labelled in the cached list's style |
 | Codex Desktop app | ChatGPT.exe in `OpenAI.Codex_*` (Classic excluded) | Hook model if Desktop fires one, else the latest composer pick in `.codex-global-state.json` (verified live process only). The CLI never reads this file |
 | Claude Code | Lifecycle hooks + process | Hook input / transcript tail |
-| Claude Desktop app | Claude.exe foreground window/process/package + UI Automation | Model selector button first text child (positive HWND/PID binding; Menu/ambiguous/missing fail closed to app-only); background CLI hook never overrides |
-| Muse Code | Lifecycle hooks + process | Hook input `model` per bound session (global `settings.json` is never shown) (receiver ancestor PID+creation binding; foreground-associated or retained instance wins, ambiguity fails app-only); headless `exec --session-id <UUID>` keeps its guarded process model; explicit hook `--model` still wins |
-| Grok Code | Lifecycle hooks + process | Hook input explicit top-level model, or the bound session's `summary.json` `current_model_id` (config default and nested `tool_input` fields are never used; unbound stays app-only) |
+| Claude Desktop app | Claude.exe foreground window/process/package + UI Automation | Model selector button first text child (positive HWND/PID binding). When unreadable (Code tab), its own Code-tab runners (`claude --output-format stream-json --model=<id> [--resume=<id>]` children of Claude.exe) name the model if all agree, each preferring its bound `claude_entrypoint=claude-desktop` hook session; terminal hooks never override. The `empty-state-draft` hook is ignored and `default` is never a model |
+| Muse Code | Lifecycle hooks + process | Hook input `model` per bound session (global `settings.json` is never shown) (receiver ancestor PID+creation binding; foreground-associated or retained instance wins, ambiguity fails app-only); headless `exec --session-id <UUID>` keeps its guarded process model; TUI without hooks: the single session whose UUIDv7 time is within 3 s of the process start, then the session of the latest `tui-history.jsonl` entry once that startup session appears there; explicit hook `--model` still wins |
+| Grok Code | Lifecycle hooks + process | Hook input explicit top-level model, or the bound session's `summary.json` `current_model_id`; process-only grok.exe binds through `~/.grok/active_sessions.json` (pid -> session). Config default and nested `tool_input` fields are never used |
 | Antigravity CLI (`agy`) | Process (`agy.exe`) + the shared hooks.json | Last `Propagating selected model override to backend: label="..."` in `~/.gemini/antigravity-cli/cli.log`, else `settings.json` `model` |
-| Antigravity | Hooks + process | `last_selected_agent_model` placeholder in `antigravity_state.pbtxt`, resolved only through pairs learned from its own `conversations/*.db` `gen_metadata` records (seeded); unknown placeholder = app-only. Transcripts are never mined |
-| OpenCode / Cursor / Pi | Process only | None (application name only) |
+| Antigravity | Hooks + process | `last_selected_agent_model` placeholder in `antigravity_state.pbtxt`, resolved first through the picker's own list (`GetCascadeModelConfigData` on the local `language_server.exe` HTTP port from `%APPDATA%/Antigravity/logs/language_server.log`, CSRF token from its command line, stored in `cache/antigravity-models.json`; unknown placeholder retried every 30 s, so new models need no update), then pairs learned from its `conversations/*.db` `gen_metadata` records (seeded); still unknown = app-only. Transcripts are never mined |
+| OpenCode | Process | `~/.local/state/opencode/model.json` `recent[0]`, named from `~/.cache/opencode/models.json` |
+| Cursor app | Process | `state.vscdb` `aiSettings.modelConfig.composer.modelName`, labelled by `availableDefaultModels2` `inputboxShortModelName` (`default` = "Auto"); Cursor CLI stays app-only |
+| Pi | Process only | None (application name only) |
 
 Selection: hook sessions outrank process detection; the Windows foreground
 window (including terminal descendants) outranks everything when several

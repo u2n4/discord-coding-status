@@ -2,10 +2,15 @@
   <img src="./assets/cover.png" width="581" alt="Discord Coding Status showing a live AI coding session in Discord Rich Presence">
 </p>
 
-> **Minimal-display fork (Ali).** This copy is customized so Discord shows ONLY the AI app
-> name (through its Discord application identity) plus one `Model: <id>` line — no activity,
-> project, quota, timestamps, or anything else. `SHOW_*`, detail levels, and activity styles
-> are inert here. Differences from upstream:
+> **Independent project by [u2n4](https://github.com/u2n4)**, originally based on
+> [howznguyen/discord-coding-status](https://github.com/howznguyen/discord-coding-status) (MIT, credit kept in
+> `LICENSE`). Discord shows ONLY the AI app name (through its Discord application identity)
+> plus one `Model: <label>` line written the way each tool writes it — no activity, project,
+> quota, or anything else. `SHOW_*`, detail levels, and activity styles are inert here.
+> Differences from the original:
+> - **Every tool shows its model**: Claude Code/Desktop, Codex CLI/Desktop, Antigravity and its
+>   CLI (`agy`), Cursor, Grok Code, Muse Code and OpenCode, each read from the tool's own data
+>   (see [What Discord displays](#what-discord-displays)).
 > - **Muse Code support**: native lifecycle hooks plus process detection. Hook sessions bind each TUI to its owning Muse process, and only the foreground-associated (or retained) instance shows its model; headless `exec --session-id <UUID>` keeps its exact-UUID live model for hook-less setups, and unbound/ambiguous TUIs stay application name only.
 >   Requires your own Discord application (one-time setup below).
 > - **Fixed detection**: ChatGPT Classic is no longer mistaken for Codex Desktop; headless
@@ -53,7 +58,7 @@ Discord Coding Status is a small local daemon that keeps your Discord activity i
 
 - **Real-time updates** - Codex, Claude Code, Grok Code, Muse Code, OpenCode, Pi, and Cursor hook and process changes reach Discord immediately; polling remains as a fallback.
 - **Codex, Claude Code, Grok Code, Muse Code, OpenCode, Pi, and Cursor** - separate Discord application identities are built in for each tool (Muse Code needs your own application; see above).
-- **Minimal display** - Discord shows only the app name plus one raw `Model: <id>` line; activity, project, quota, and everything else stay off Discord.
+- **Minimal display** - Discord shows only the app name plus one `Model: <label>` line, written the way each tool writes it; activity, project, quota, and everything else stay off Discord.
 - **Quota aware (CLI only)** - the `quota` and `status` commands read Codex quota from OAuth/app-server RPC, Claude subscription quota from Claude Code OAuth, Grok billing quota, OpenCode Go usage, and Cursor dashboard usage; presence itself never shows quota.
 - **Local-first** - session state stays on your machine and Rich Presence uses Discord's local IPC/RPC transport.
 - **Starts with your session** - installs a LaunchAgent on macOS or a Scheduled Task on Windows.
@@ -180,21 +185,41 @@ Existing user configuration and session state are preserved. If the managed hook
 
 ## What Discord displays
 
-This fork shows ONLY the application identity plus one raw model line:
+Discord shows ONLY the application identity plus one model line, with the model written exactly the way the tool's own picker writes it:
 
 ```text
 Playing <App>          <- Discord application identity per tool
-Model: <raw model id>  <- details line, or absent when the model is unknown
+Model: <app label>     <- details line, or absent when the model is unknown
 ```
 
-For example:
+Real captures from a Discord profile (Windows, 2026-11-03):
 
-```text
-Playing Codex
-Model: gpt-5.6-sol
-```
+| Tool | In Discord |
+| --- | --- |
+| Claude Code / Claude Desktop | <img src="./docs/screenshots/claude.jpg" width="300" alt="ClaudeCode, Model: Opus 5.5"> |
+| Codex (Desktop app) | <img src="./docs/screenshots/codex.jpg" width="300" alt="Codex, Model: GPT-6.1 Sol"> |
+| Antigravity | <img src="./docs/screenshots/antigravity.jpg" width="300" alt="Antigravity, Model: Gemini 4 Argon"> |
+| Cursor | <img src="./docs/screenshots/cursor.jpg" width="300" alt="Cursor AI, Model: Composer 2.5"> |
+| Grok Code | <img src="./docs/screenshots/grok.jpg" width="300" alt="Grok Code, Model: Grok 4.7"> |
+| Muse Code | <img src="./docs/screenshots/muse.jpg" width="300" alt="Muse Code, Model: Muse Spark 1.3"> |
+| OpenCode | <img src="./docs/screenshots/opencode.jpg" width="300" alt="Open Code, Model: Hy4 preview"> |
 
-Model ids are raw (never guessed or prettified). There is no effort suffix, activity, project, quota, context, emoji, session counts, or timestamps; an unknown or ambiguous model means application name only.
+Where each model comes from (every source is the tool's own data, so a newly released model shows up without updating this project):
+
+| Tool | Model source | Label |
+| --- | --- | --- |
+| Claude Code | Hook input / transcript | `claude-opus-5-5` → "Opus 5.5" |
+| Claude Desktop | Model selector (UI Automation); Code tab falls back to its own Claude Code runners (`--model`, `--resume` session hooks) when they all agree | As the app writes it |
+| Codex CLI | Hook model, else the live process's `--model` / `-m` / `-c model=` flag, else `config.toml` (a `/model` switch after launch wins) | `models_cache.json` `display_name` ("GPT-6.1-Sol"); unlisted `gpt-*` slugs in the same style |
+| Codex Desktop | Hook model, else the latest composer pick | "GPT-6.1 Sol" |
+| Antigravity | Picker placeholder resolved through Antigravity's own language server list (`GetCascadeModelConfigData`), cached | "Gemini 4 Argon" (effort dropped) |
+| Antigravity CLI (`agy`) | Last model line in `cli.log` | As `agy models` lists it |
+| Cursor | Agent pick in `state.vscdb` (`aiSettings.modelConfig.composer`) | Cursor's own input-box name ("Auto", "Composer 2.5") |
+| Grok Code | Hook model, else `~/.grok/active_sessions.json` (pid → session) → `summary.json` | `models_cache.json` name ("Grok 4.7") |
+| Muse Code | Hook model; headless `exec --session-id`; TUI: the session it opened at startup (UUIDv7 time) or its latest `tui-history.jsonl` session | "Muse Spark 1.3" |
+| OpenCode | `~/.local/state/opencode/model.json` newest pick | Name from OpenCode's models cache |
+
+There is no effort suffix, activity, project, quota, context, emoji, or session count; an unknown or ambiguous model means application name only. When a tool has both an app and a CLI, the app wins unless the CLI's terminal is in front. Run `node scripts/diagnose-presence.js` to see what every running tool would publish.
 
 ### Detail levels
 
