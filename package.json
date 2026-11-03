@@ -1,8 +1,8 @@
 {
   "name": "discord-coding-status",
-  "version": "1.6.1",
-  "description": "Local Discord Rich Presence daemon for Claude Code and Codex.",
-  "author": "howznguyen",
+  "version": "2.0.0",
+  "description": "Shows the AI coding tool you are using, and its model, in your Discord status (Claude, Codex, Antigravity, Cursor, Grok, Muse, OpenCode).",
+  "author": "u2n4 (originally by howznguyen)",
   "main": "dist/cli.js",
   "bin": {
     "discord-coding-status": "dist/cli.js"
@@ -12,7 +12,6 @@
     "dist/",
     "docs/",
     "README.md",
-    "assets/cover.png",
     "LICENSE",
     ".env.example"
   ],
@@ -63,6 +62,6 @@
     "typescript": "^5.8.0"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   }
 }

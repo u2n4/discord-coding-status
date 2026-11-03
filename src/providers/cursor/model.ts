@@ -1,8 +1,8 @@
 'use strict';
 
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { cursorStateDbPath } from './quota';
 
 // Cursor keeps its settings in User/globalStorage/state.vscdb (SQLite). The
 // applicationUser blob holds both the Agent chat pick
@@ -40,8 +40,7 @@ export function getCursorStateDatabase(): string {
   if (override) {
     return path.resolve(override);
   }
-  const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-  return path.join(appData, 'Cursor', 'User', 'globalStorage', 'state.vscdb');
+  return cursorStateDbPath();
 }
 
 export function parseCursorApplicationUser(json: unknown): string | null {

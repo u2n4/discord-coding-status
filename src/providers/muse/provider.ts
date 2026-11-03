@@ -7,7 +7,7 @@ import { isMuseProcess } from '../../core/detection/tool-detection';
 // named "Muse Code" in the Discord developer portal and set its client ID via
 // DISCORD_CODING_STATUS_MUSE_CLIENT_ID (config file or environment). The
 // empty default keeps the daemon running; Muse presence stays off until set.
-export const DEFAULT_MUSE_CLIENT_ID = '';
+export const DEFAULT_MUSE_CLIENT_ID = '1564448755250372688';
 export const DEFAULT_MUSE_IMAGE_KEY = 'https://github.com/meta-llama.png';
 
 export const museCliProvider: ToolProvider = {

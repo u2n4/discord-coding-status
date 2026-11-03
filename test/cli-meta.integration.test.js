@@ -12,12 +12,13 @@ test('an empty CLI invocation prints project information and usage without start
   const result = await runCli([], env);
 
   assert.match(result.stdout, /Discord Coding Status \d+\.\d+\.\d+/);
-  assert.match(result.stdout, /Local Discord Rich Presence for Codex and Claude Code\./);
+  assert.match(result.stdout, /Shows the AI coding tool you are using, and its model, in your Discord status\./);
   assert.match(result.stdout, /Usage:/);
-  assert.match(result.stdout, /Author: @howznguyen/);
-  assert.match(result.stdout, /Website: https:\/\/howznguyen\.dev\/projects\/discord-coding-status/);
-  assert.match(result.stdout, /Repository: https:\/\/github\.com\/howznguyen\/discord-coding-status/);
-  assert.match(result.stdout, /npx -y discord-coding-status@latest setup/);
+  assert.match(result.stdout, /Author: @u2n4/);
+  assert.match(result.stdout, /Website: https:\/\/github\.com\/u2n4\/discord-coding-status#readme/);
+  assert.match(result.stdout, /Repository: https:\/\/github\.com\/u2n4\/discord-coding-status/);
+  assert.match(result.stdout, /discord-coding-status setup/);
+  assert.match(result.stdout, /Antigravity: \d+/);
   assert.doesNotMatch(result.stdout, /Starting Discord Coding Status daemon/);
   assert.equal(result.stderr, '');
 });

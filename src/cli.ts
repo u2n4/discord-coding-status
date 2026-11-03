@@ -72,7 +72,9 @@ import {
   DEFAULT_OPENCODE_CLIENT_ID,
   DEFAULT_PI_CLIENT_ID,
   DEFAULT_GROK_CLIENT_ID,
+  DEFAULT_CURSOR_CLIENT_ID,
   DEFAULT_MUSE_CLIENT_ID,
+  DEFAULT_ANTIGRAVITY_CLIENT_ID,
   requireToolPresence,
   toolProviders
 } from './providers/registry';
@@ -104,6 +106,7 @@ import {
   GROK_CLIENT_ID,
   CURSOR_CLIENT_ID,
   MUSE_CLIENT_ID,
+  ANTIGRAVITY_CLIENT_ID,
   DETAIL_LEVEL,
   CODEX_QUOTA_SOURCE,
   CODEX_BIN,
@@ -449,9 +452,21 @@ function compactConfigEntries(entries: Record<string, string>): Record<string, s
   );
   setConfigIfCustom(
     next,
+    'DISCORD_CODING_STATUS_CURSOR_CLIENT_ID',
+    entries.DISCORD_CODING_STATUS_CURSOR_CLIENT_ID || DEFAULT_CURSOR_CLIENT_ID,
+    DEFAULT_CURSOR_CLIENT_ID
+  );
+  setConfigIfCustom(
+    next,
     'DISCORD_CODING_STATUS_MUSE_CLIENT_ID',
     entries.DISCORD_CODING_STATUS_MUSE_CLIENT_ID || DEFAULT_MUSE_CLIENT_ID,
     DEFAULT_MUSE_CLIENT_ID
+  );
+  setConfigIfCustom(
+    next,
+    'DISCORD_CODING_STATUS_ANTIGRAVITY_CLIENT_ID',
+    entries.DISCORD_CODING_STATUS_ANTIGRAVITY_CLIENT_ID || DEFAULT_ANTIGRAVITY_CLIENT_ID,
+    DEFAULT_ANTIGRAVITY_CLIENT_ID
   );
   setConfigIfCustom(
     next,
@@ -675,6 +690,7 @@ function uninstallStartup(purge: boolean): void {
     throw new Error('Uninstall currently supports macOS and Windows.');
   }
 
+  stopManagedDaemonFromLock();
   fs.rmSync(getInstallDirectory(), { recursive: true, force: true });
   if (purge) {
     fs.rmSync(CONFIG_DIR, { recursive: true, force: true });
@@ -838,6 +854,7 @@ async function main(): Promise<void> {
     grokClientId: GROK_CLIENT_ID,
     cursorClientId: CURSOR_CLIENT_ID,
     museClientId: MUSE_CLIENT_ID,
+    antigravityClientId: ANTIGRAVITY_CLIENT_ID,
     configFile: CONFIG_FILE,
     stateFile: STATE_FILE
   })) {

@@ -84,3 +84,29 @@ test('config reset restarts an installed macOS launch agent unless disabled', {
   assert.match(skipped.stdout, /Daemon restart skipped by --no-restart\./);
   assert.equal(fs.readFileSync(restartLog, 'utf8'), '');
 });
+
+test('config keeps a custom Discord application ID for every tool', async (t) => {
+  const { directory, env: baseEnv } = createTestEnvironment(t);
+  const env = {
+    ...baseEnv,
+    HOME: directory,
+    USERPROFILE: directory
+  };
+  const ids = {
+    codexClientId: '100000000000000001',
+    claudeClientId: '100000000000000002',
+    opencodeClientId: '100000000000000003',
+    piClientId: '100000000000000004',
+    grokClientId: '100000000000000005',
+    cursorClientId: '100000000000000006',
+    museClientId: '100000000000000007',
+    antigravityClientId: '100000000000000008'
+  };
+  const configDirectory = path.join(directory, 'discord-coding-status');
+  fs.mkdirSync(configDirectory, { recursive: true });
+  fs.writeFileSync(path.join(configDirectory, 'config.json'), `${JSON.stringify(ids, null, 2)}\n`);
+
+  const shown = await runCli(['config', '--show'], env);
+  assert.deepEqual(JSON.parse(shown.stdout), ids);
+  assert.equal(shown.stderr, '');
+});

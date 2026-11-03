@@ -1,731 +1,268 @@
-<p align="center">
-  <img src="./assets/cover.png" width="581" alt="Discord Coding Status showing a live AI coding session in Discord Rich Presence">
-</p>
-
-> **Independent project by [u2n4](https://github.com/u2n4)**, originally based on
-> [howznguyen/discord-coding-status](https://github.com/howznguyen/discord-coding-status) (MIT, credit kept in
-> `LICENSE`). Discord shows ONLY the AI app name (through its Discord application identity)
-> plus one `Model: <label>` line written the way each tool writes it — no activity, project,
-> quota, or anything else. `SHOW_*`, detail levels, and activity styles are inert here.
-> Differences from the original:
-> - **Every tool shows its model**: Claude Code/Desktop, Codex CLI/Desktop, Antigravity and its
->   CLI (`agy`), Cursor, Grok Code, Muse Code and OpenCode, each read from the tool's own data
->   (see [What Discord displays](#what-discord-displays)).
-> - **Muse Code support**: native lifecycle hooks plus process detection. Hook sessions bind each TUI to its owning Muse process, and only the foreground-associated (or retained) instance shows its model; headless `exec --session-id <UUID>` keeps its exact-UUID live model for hook-less setups, and unbound/ambiguous TUIs stay application name only.
->   Requires your own Discord application (one-time setup below).
-> - **Fixed detection**: ChatGPT Classic is no longer mistaken for Codex Desktop; headless
->   `codex exec-server` is no longer mistaken for Codex CLI.
-> - **Foreground-aware switching** on Windows; **duplicate-daemon lock**; tools without a
->   Discord application ID never blank other tools.
-> - Quota/network lookups are never made for presence. Group policy: none of your prompts,
->   files, or projects ever leave the machine.
->
-> **Muse Code Discord app (2 minutes, one time):** create an application named exactly
-> `Muse Code` at https://discord.com/developers/applications (no bot needed; optionally
-> upload an icon as an application asset), copy its Application ID, and add
-> `"DISCORD_CODING_STATUS_MUSE_CLIENT_ID": "<id>"` to `~/discord-coding-status/config.json`.
-> Then restart the daemon (`schtasks /Run /TN DiscordCodingStatus`) or reboot.
->
 <h1 align="center">Discord Coding Status</h1>
 
 <p align="center">
-  Real-time Discord Rich Presence for Codex, Claude Code, Grok Code, Muse Code, OpenCode, Pi, and Cursor.
+  Shows the AI coding tool you are using, and its model, in your Discord status.
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/discord-coding-status"><img src="https://img.shields.io/npm/v/discord-coding-status?logo=npm&logoColor=white&color=CB3837" alt="npm version"></a>
-  <a href="https://howznguyen.dev/projects/discord-coding-status"><img src="https://img.shields.io/badge/project-howznguyen.dev-111827" alt="Discord Coding Status project page"></a>
-  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%E2%89%A518-339933?logo=nodedotjs&logoColor=white" alt="Node.js 18 or newer"></a>
-  <img src="https://img.shields.io/badge/startup-macOS%20%7C%20Windows-5865f2" alt="Startup support for macOS and Windows">
+  <a href="https://github.com/u2n4/discord-coding-status/actions/workflows/ci.yml"><img src="https://github.com/u2n4/discord-coding-status/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://nodejs.org/"><img src="https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=nodedotjs&logoColor=white" alt="Node.js 20 or newer"></a>
+  <img src="https://img.shields.io/badge/tested%20on-Windows%2011-0078D4" alt="Tested on Windows 11">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-0ea5e9" alt="MIT License"></a>
-  <a href="https://knowns.sh/"><img src="https://img.shields.io/badge/managed%20with-Knowns-111827" alt="Managed with Knowns"></a>
-  <a href="https://discord.knowns.dev/"><img src="https://img.shields.io/badge/Discord-Knowns%20Community-5865F2?logo=discord&logoColor=white" alt="Join the Knowns Community on Discord"></a>
 </p>
-
-<p align="center">
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#configuration">Configuration</a> ·
-  <a href="#troubleshooting">Troubleshooting</a> ·
-  <a href="./CONTRIBUTING.md">Contributing</a>
-</p>
-
-Discord Coding Status is a small local daemon that keeps your Discord activity in sync with your AI coding sessions. It combines lifecycle hooks with process detection, enriches activity with sanitized project metadata, active-model metadata, and optional native quota, then publishes it through Discord Desktop's local RPC connection.
-
-> [!NOTE]
-> This is not a Discord bot or webhook. It does not need a bot token, public server, or cloud relay. Discord Desktop must be running on the same computer.
-
-## Why use it?
-
-- **Real-time updates** - Codex, Claude Code, Grok Code, Muse Code, OpenCode, Pi, and Cursor hook and process changes reach Discord immediately; polling remains as a fallback.
-- **Codex, Claude Code, Grok Code, Muse Code, OpenCode, Pi, and Cursor** - separate Discord application identities are built in for each tool (Muse Code needs your own application; see above).
-- **Minimal display** - Discord shows only the app name plus one `Model: <label>` line, written the way each tool writes it; activity, project, quota, and everything else stay off Discord.
-- **Quota aware (CLI only)** - the `quota` and `status` commands read Codex quota from OAuth/app-server RPC, Claude subscription quota from Claude Code OAuth, Grok billing quota, OpenCode Go usage, and Cursor dashboard usage; presence itself never shows quota.
-- **Local-first** - session state stays on your machine and Rich Presence uses Discord's local IPC/RPC transport.
-- **Starts with your session** - installs a LaunchAgent on macOS or a Scheduled Task on Windows.
-- **Tested without Discord** - integration and stress tests use a deterministic local RPC transport.
-
-## How it works
-
-```mermaid
-flowchart LR
-    H["Codex lifecycle hooks"] --> D["Local daemon"]
-    C["Claude lifecycle hooks"] --> D
-    G["Grok lifecycle hooks"] --> D
-    M["Muse lifecycle hooks"] --> D
-    P["Process detection"] --> D
-    D --> S["Sanitize and enrich activity"]
-    Q["Codex quota source"] -. optional .-> S
-    CQ["Claude subscription OAuth"] -. eligible sessions only .-> S
-    GRQ["Grok billing quota"] -. optional .-> S
-    CRQ["Cursor dashboard usage"] -. optional .-> S
-    S --> R["Discord Desktop RPC"]
-```
-
-The state file is watched for immediate changes. A 10-second process/polling loop keeps working as a fallback when hooks or file watching are unavailable.
-
-## Supported tools
-
-| Tool | Activity source | Native quota | Discord identity |
-| --- | --- | --- | --- |
-| Codex CLI | Lifecycle hooks + process fallback | OAuth or app-server RPC | Codex |
-| Codex in ChatGPT desktop | Process detection | OAuth or app-server RPC | Codex |
-| Claude Code | Lifecycle hooks + process fallback | Subscription OAuth | Claude Code |
-| Claude Desktop | Process detection | — | Claude Code |
-| Grok Code | Lifecycle hooks + process fallback | Billing API | Grok Code |
-| OpenCode CLI | Process detection | OpenCode Go usage | OpenCode |
-| Pi | Process detection | — | Pi |
-| Cursor IDE / CLI | Process detection | Cursor dashboard usage | Cursor |
-| Muse Code | Lifecycle hooks + process fallback | — | Muse Code |
-
-If multiple tools are active together, the daemon submits presence only for the tool whose session was updated most recently and clears the others. Discord Desktop can display a single activity per user, so this keeps the harness you are actually using in view instead of a stale background process.
-
-## Requirements
-
-- Node.js 18 or newer
-- Discord Desktop, signed in and running
-- Codex CLI, ChatGPT desktop with Codex, Claude Code, Claude Desktop, Grok Code, Muse Code, OpenCode, Pi, or Cursor
-- macOS or Windows for automatic startup installation
-
-Linux can run the daemon manually, but `setup` and `uninstall` currently manage startup only on macOS and Windows.
-
-## Quick start
-
-Run the package without a subcommand to print project information, available commands, paths, and examples. This does not start the daemon:
-
-```sh
-npx -y discord-coding-status@latest
-```
-
-### 1. Install and start
-
-```sh
-npx -y discord-coding-status@latest setup
-```
-
-Setup performs four actions:
-
-1. Detects local Codex/ChatGPT, Claude, Grok Code, Muse Code, OpenCode, Pi, and Cursor CLI or desktop installations.
-2. Copies a self-contained runtime into your user application-data directory.
-3. Installs and starts a macOS LaunchAgent or Windows Scheduled Task.
-4. Installs managed Codex hooks when Codex is detected, Claude hooks when Claude Code is detected, Grok hooks when Grok Code is detected, and Muse hooks when Muse Code is detected.
-
-Force hook installation if a tool was not detected:
-
-```sh
-npx -y discord-coding-status@latest setup --codex-hooks
-npx -y discord-coding-status@latest setup --claude-hooks
-npx -y discord-coding-status@latest setup --grok-hooks
-npx -y discord-coding-status@latest setup --muse-hooks
-```
-
-Skip either managed hook set:
-
-```sh
-npx -y discord-coding-status@latest setup --no-codex-hooks
-npx -y discord-coding-status@latest setup --no-claude-hooks
-npx -y discord-coding-status@latest setup --no-grok-hooks
-npx -y discord-coding-status@latest setup --no-muse-hooks
-```
-
-### 2. Trust Codex hooks
-
-After installing or changing hooks, open Codex and run:
-
-```text
-/hooks
-```
-
-Review and trust the six Discord Coding Status command hooks. This approval is required by Codex before the hooks can run.
-
-### 3. Verify the installation
-
-```sh
-npx discord-coding-status status
-npx discord-coding-status hooks status codex
-npx discord-coding-status hooks status claude
-npx discord-coding-status hooks status grok
-npx discord-coding-status quota --source oauth
-npx discord-coding-status quota --tool claude
-npx discord-coding-status quota --tool grok
-npx discord-coding-status quota --tool cursor
-npx discord-coding-status quota --tool opencode
-```
-
-Start a Codex, Claude Code, Grok Code, Muse Code, OpenCode, Pi, or Cursor session, then submit a prompt or use a tool. OpenCode, Pi, and Cursor are detected through their running process; Discord updates within the polling interval (10 seconds by default). Codex, Claude Code, Grok Code, and Muse Code also update immediately through managed lifecycle hooks. Muse hooks load at session startup, so restart running Muse sessions after installing them.
-
-### Updating
-
-Run setup from the latest published package to replace the copied runtime, refresh its production dependencies, reload startup, and update the managed hooks:
-
-```sh
-npx -y discord-coding-status@latest setup --codex-hooks --claude-hooks --grok-hooks --muse-hooks
-```
-
-Existing user configuration and session state are preserved. If the managed hook commands changed, open Codex and run `/hooks` to review and trust them again.
-
-## What Discord displays
-
-Discord shows ONLY the application identity plus one model line, with the model written exactly the way the tool's own picker writes it:
-
-```text
-Playing <App>          <- Discord application identity per tool
-Model: <app label>     <- details line, or absent when the model is unknown
-```
-
-Real captures from a Discord profile (Windows, 2026-11-03, native-resolution screen copies):
 
 <p align="center">
   <img src="./docs/screenshots/gallery.png" width="760" alt="Discord activity cards: ClaudeCode Opus 5.5, Codex GPT-6.1 Sol, Codex GPT-6.2-Astra, Antigravity Gemini 4 Argon, Cursor AI Composer 2.5, Grok Code Grok 4.7, Muse Code Muse Spark 1.3, Open Code Hy4 preview">
 </p>
 
-| Tool | In Discord |
-| --- | --- |
-| Claude Code / Claude Desktop | <img src="./docs/screenshots/claude.png" width="360" alt="ClaudeCode, Model: Opus 5.5"> |
-| Codex Desktop app | <img src="./docs/screenshots/codex.png" width="360" alt="Codex, Model: GPT-6.1 Sol"> |
-| Codex CLI (`codex --model gpt-6.2-astra`) | <img src="./docs/screenshots/codex-cli.png" width="360" alt="Codex, Model: GPT-6.2-Astra"> |
-| Antigravity | <img src="./docs/screenshots/antigravity.png" width="360" alt="Antigravity, Model: Gemini 4 Argon"> |
-| Cursor | <img src="./docs/screenshots/cursor.png" width="360" alt="Cursor AI, Model: Composer 2.5"> |
-| Grok Code | <img src="./docs/screenshots/grok.png" width="360" alt="Grok Code, Model: Grok 4.7"> |
-| Muse Code | <img src="./docs/screenshots/muse.png" width="360" alt="Muse Code, Model: Muse Spark 1.3"> |
-| OpenCode | <img src="./docs/screenshots/opencode.png" width="360" alt="Open Code, Model: Hy4 preview"> |
+A small background program that watches which AI coding tool you are working in and puts it on your
+Discord profile, with the model you picked:
 
-Where each model comes from (every source is the tool's own data, so a newly released model shows up without updating this project):
+```text
+Playing Codex
+Model: GPT-6.1 Sol
+```
 
-| Tool | Model source | Label |
+That is all Discord ever sees: the tool's name and one model line, written the way the tool itself
+writes it. No prompts, files, project names, branches, quotas or timers.
+
+It is not a Discord bot. It talks to the Discord Desktop app on your own computer, so there is no
+token, server or account to set up.
+
+## Contents
+
+- [Supported tools](#supported-tools)
+- [Requirements](#requirements)
+- [Install](#install)
+- [How it chooses what to show](#how-it-chooses-what-to-show)
+- [Check that it works](#check-that-it-works)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
+- [Update](#update)
+- [Uninstall](#uninstall)
+- [Privacy](#privacy)
+- [Development](#development)
+- [Credits and license](#credits-and-license)
+
+## Supported tools
+
+Every model is read from the tool's own files or its own model list, so a model released tomorrow
+shows up without updating this project. If the model cannot be proven, Discord shows the tool's name
+only; it never guesses.
+
+| Tool | In Discord | Where the model comes from |
 | --- | --- | --- |
-| Claude Code | Hook input / transcript | `claude-opus-5-5` → "Opus 5.5" |
-| Claude Desktop | Model selector (UI Automation); Code tab falls back to its own Claude Code runners (`--model`, `--resume` session hooks) when they all agree | As the app writes it |
-| Codex CLI | Hook model (headless `codex exec` runs are ignored), else the live process's `--model` / `-m` / `-c model=` flag, else `config.toml` (a `/model` switch after launch wins); an idle CLI still counts while its terminal is in front | `models_cache.json` `display_name` ("GPT-6.1-Sol"); unlisted `gpt-*` slugs in the same style |
-| Codex Desktop | Hook model, else the latest composer pick | "GPT-6.1 Sol" |
-| Antigravity | Picker placeholder resolved through Antigravity's own language server list (`GetCascadeModelConfigData`), cached | "Gemini 4 Argon" (effort dropped) |
-| Antigravity CLI (`agy`) | Last model line in `cli.log` | As `agy models` lists it |
-| Cursor | Agent pick in `state.vscdb` (`aiSettings.modelConfig.composer`) | Cursor's own input-box name ("Auto", "Composer 2.5") |
-| Grok Code | Hook model, else `~/.grok/active_sessions.json` (pid → session) → `summary.json` | `models_cache.json` name ("Grok 4.7") |
-| Muse Code | Hook model; headless `exec --session-id`; TUI: the session it opened at startup (UUIDv7 time) or its latest `tui-history.jsonl` session | "Muse Spark 1.3" |
-| OpenCode | `~/.local/state/opencode/model.json` newest pick | Name from OpenCode's models cache |
+| Claude Code (CLI) | <img src="./docs/screenshots/claude.png" width="300" alt="ClaudeCode, Model: Opus 5.5"> | Hook data, else the session transcript |
+| Claude Desktop app | same identity as Claude Code | The model button in the window; on the Code tab, the Claude Code sessions the app runs |
+| Codex Desktop app | <img src="./docs/screenshots/codex.png" width="300" alt="Codex, Model: GPT-6.1 Sol"> | Hook data, else the model you last picked in the composer |
+| Codex CLI | <img src="./docs/screenshots/codex-cli.png" width="300" alt="Codex, Model: GPT-6.2-Astra"> | Hook data, else the `--model` / `-m` flag, else `config.toml` (a `/model` switch counts) |
+| Antigravity | <img src="./docs/screenshots/antigravity.png" width="300" alt="Antigravity, Model: Gemini 4 Argon"> | The picker's selection, named through Antigravity's own model list |
+| Antigravity CLI (`agy`) | same identity as Antigravity | The last model line in its `cli.log` |
+| Cursor | <img src="./docs/screenshots/cursor.png" width="300" alt="Cursor AI, Model: Composer 2.5"> | The Agent model pick in Cursor's settings database |
+| Grok Code | <img src="./docs/screenshots/grok.png" width="300" alt="Grok Code, Model: Grok 4.7"> | Hook data, else the running session's `summary.json` |
+| Muse Code | <img src="./docs/screenshots/muse.png" width="300" alt="Muse Code, Model: Muse Spark 1.3"> | Hook data, else the session the running TUI opened |
+| OpenCode | <img src="./docs/screenshots/opencode.png" width="300" alt="Open Code, Model: Hy4 preview"> | Your latest pick in `~/.local/state/opencode/model.json` |
+| Pi | tool name only | — |
 
-There is no effort suffix, activity, project, quota, context, emoji, or session count; an unknown or ambiguous model means application name only. When a tool has both an app and a CLI, the app wins unless the CLI's terminal is in front. Run `node scripts/diagnose-presence.js` to see what every running tool would publish.
+The screenshots are real Discord captures (Windows 11, November 2026).
 
-### Detail levels
+## Requirements
 
-| Level | Activity | Project + branch | Model + effort | Quota | Context | Package name |
-| --- | --- | --- | --- | --- | --- | --- |
-| `safe` | Yes | No | Yes | No | No | No |
-| `project` (default) | Yes | Yes | Yes | Yes | No | No |
-| `full` | Yes | Yes | Yes | Yes | No | Yes |
+| Need | Notes |
+| --- | --- |
+| Discord **Desktop** app, signed in | The browser version of Discord cannot receive activity. |
+| Node.js 20 or newer | Node.js 22.13+ (or 24) is recommended: Cursor's model, and the Antigravity fallback, are read with Node's built-in SQLite. |
+| Windows 10/11 | Tested here: every tool above, start-at-login, window-focus switching. |
+| macOS | Start-at-login and hooks come from the original project and are not re-tested. Antigravity's model list and Claude Desktop's model button are read on Windows only. |
+| Linux | Not supported by `setup`, `uninstall` or start-at-login, and untested. |
+| Git | To download the project. |
 
-Project values are sanitized before being sent to Discord. Full filesystem paths are not used as Rich Presence text. (In this fork the table above is inert upstream history: presence shows only the raw model line.)
+In Discord, open **User Settings → Activity Privacy** and turn on sharing your activity, or nobody
+(including you) will see the card.
+
+## Install
+
+```sh
+git clone https://github.com/u2n4/discord-coding-status.git
+cd discord-coding-status
+npm ci
+npm run build
+node dist/cli.js setup
+```
+
+Run every `node dist/cli.js` command in this guide from that `discord-coding-status` folder, and keep
+the folder: you use it to update or uninstall.
+
+`setup`:
+
+1. finds the AI tools you have installed;
+2. copies a self-contained copy of the program into your user app-data folder;
+3. registers it to start when you log in (a Scheduled Task on Windows, a LaunchAgent on macOS) and
+   starts it now;
+4. adds small lifecycle hooks to the tools that support them (Codex, Claude Code, Grok Code, Muse
+   Code, Antigravity), so model changes reach Discord at once.
+
+Then:
+
+- **Codex:** open Codex, type `/hooks`, and trust the six Discord Coding Status hooks. Codex will not
+  run them until you do.
+- Restart any Codex, Claude Code, Grok Code or Muse Code session that was already open, so it loads
+  the new hooks.
+
+Hooks are optional. Every tool is also found from its running process; hooks just make updates
+instant. Skip or force one tool's hooks with `--no-<tool>-hooks` or `--<tool>-hooks`, for example
+`node dist/cli.js setup --no-grok-hooks`.
+
+## How it chooses what to show
+
+Discord shows one activity at a time, so when several tools are open:
+
+1. The tool in the window you are looking at wins (Windows). A CLI counts when its terminal is in
+   front, even while it waits for you.
+2. When a tool has both an app and a CLI (Claude, Codex), the app wins unless the CLI's terminal is in
+   front.
+3. A tool reporting through hooks outranks one only seen as a running process.
+4. If you switch to Discord or a non-AI app, the tool you used last is preferred while it is still
+   running.
+
+## Check that it works
+
+```sh
+node dist/cli.js status
+node dist/cli.js hooks status
+```
+
+`status` shows the background service and the tools it found. `hooks status` prints, as JSON, which
+hooks are installed for each tool.
+
+This prints, for each running tool, the line it would put on Discord (it does not read Claude
+Desktop's model button, so that app can show without a model here while Discord shows it):
+
+```sh
+node scripts/diagnose-presence.js
+```
 
 ## Configuration
 
-Setup writes compact JSON configuration to:
+Most people need none. The file is `~/discord-coding-status/config.json` and starts as `{}`.
 
-```text
-~/discord-coding-status/config.json
-```
-
-Most users can keep the default `{}`. Edit configuration interactively with:
-
-```sh
-npx discord-coding-status config
-```
-
-The full-screen terminal editor shows a live two-line preview matching Discord's
-`details` and `state` rows. Use the arrow keys to move, Space or Enter to toggle a
-block, Left/Right to change a choice, `S` to save, and `Q` to cancel.
-
-The available display blocks are:
-
-- Top line: activity and project + branch.
-- Bottom line: raw model only (`Model: <id>`); effort, quota, context, and package blocks are inert in this fork.
-
-Activity text supports four styles selected directly in the TUI:
-
-| Style | Example |
-| --- | --- |
-| `fun` (default) | `Bash survived the assignment` |
-| `normal` | `Using Bash` |
-| `technical` | `Running npm test` |
-| `minimal` | `Working` |
-
-Context is optional and fail-closed: it appears only when a hook supplies a numeric
-metric such as `42%` or `128k / 256k`. Free-form context text is discarded so prompt
-or transcript content cannot become Discord activity.
-
-Press `A` from the TUI, or run `config --advanced`, to edit path, text, and image
-overrides with the original prompt-based editor. For scripts and quick inspection:
-
-```sh
-npx discord-coding-status config --show
-npx discord-coding-status config --preview
-npx discord-coding-status config --reset
-```
-
-Saving or resetting config automatically restarts a managed macOS LaunchAgent or
-Windows Scheduled Task, so changes become active immediately. Add `--no-restart`
-to skip that behavior. Linux and manually started daemons must still be restarted
-through their external service manager or terminal session.
-
-Example:
+Each tool appears in Discord through a Discord application (that is where the name and icon come
+from). Built-in applications are included for every tool; to use your own, create one at
+<https://discord.com/developers/applications> and put its Application ID here:
 
 ```json
 {
-  "detailLevel": "project",
-  "quotaSource": "oauth",
-  "activityStyle": "normal",
-  "showActivity": true,
-  "showProject": true,
-  "showModel": true,
-  "showQuota": true,
-  "showContext": false,
-  "showPackage": false,
-  "codexAuthFile": "~/.codex/auth.json",
-  "preferCodexCli": false
+  "museClientId": "123456789012345678"
 }
 ```
 
-### Common options
-
-| JSON key | Default | Purpose |
+| Key | Default | Effect |
 | --- | --- | --- |
-| `detailLevel` | `project` | Select `safe`, `project`, or `full` presence detail. |
-| `quotaSource` | `oauth` | Select `oauth`, `rpc`, `auto`, or `off`. |
-| `activityStyle` | `fun` | Select `fun`, `normal`, `technical`, or `minimal` activity text. |
-| `showActivity` | `true` | Show activity on the top line. |
-| `showProject` | preset | Show project and branch on the top line. |
-| `showModel` | `true` | Show the raw model on the bottom line (no effort suffix; inert toggle in this fork). |
-| `showQuota` | preset | Show plan and quota on the bottom line. |
-| `showContext` | `false` | Show sanitized numeric context usage on the bottom line when available. |
-| `showPackage` | preset | Show package name on the bottom line. |
-| `codexAuthFile` | `~/.codex/auth.json` | Override the Codex OAuth credential file. |
-| `stateFile` | `~/discord-coding-status/states.json` | Override local hook/runtime state storage. |
-| `planText` | - | Override the displayed plan text. |
-| `limitsText` | - | Override the displayed quota text. |
-| `codexClientId` | built in | Override the Discord application ID used for Codex. |
-| `claudeClientId` | built in | Override the Discord application ID used for Claude Code. |
-| `opencodeClientId` | built in | Override the Discord application ID used for OpenCode. |
-| `piClientId` | built in | Override the Discord application ID used for Pi. |
-| `grokClientId` | built in | Override the Discord application ID used for Grok Code. |
-| `cursorClientId` | built in | Override the Discord application ID used for Cursor. |
-| `codexImageKey` | - | Use an uploaded asset key from the Codex Discord application. |
-| `claudeImageKey` | - | Use an uploaded asset key from the Claude Discord application. |
-| `opencodeImageKey` | - | Use an uploaded asset key from the OpenCode Discord application. |
-| `piImageKey` | - | Use an uploaded asset key from the Pi Discord application. |
-| `grokImageKey` | - | Use an uploaded asset key from the Grok Discord application. |
-| `cursorImageKey` | - | Use an uploaded asset key from the Cursor Discord application. |
-| `preferCodexCli` | `false` | Prefer CLI process detection when Codex App and CLI are both active. |
+| `codexClientId`, `claudeClientId`, `antigravityClientId`, `cursorClientId`, `grokClientId`, `museClientId`, `opencodeClientId`, `piClientId` | built in | The Discord application shown for that tool. |
+| `stateFile` | `~/discord-coding-status/states.json` | Where hook sessions are stored. |
 
-See [`.env.example`](./.env.example) for advanced environment overrides used during local development.
-
-### Discord application IDs and images
-
-The built-in application IDs are:
-
-- Codex: `1517375602662051900`
-- Claude Code: `1521213655092428923`
-- OpenCode: `1538957549364322404`
-- Pi: `1538957711503396986`
-- Grok Code: `1539161996715495445`
-- Cursor: `1539572948904575087`
-
-Tool-specific IDs let each tool use a separate Discord identity. Custom image keys work only when the matching asset already exists in that Discord application. Only Muse Code has no shared public Discord application: create one named exactly `Muse Code`, set its client ID via `DISCORD_CODING_STATUS_MUSE_CLIENT_ID`, and until then the daemon skips Muse presence without affecting other tools.
-
-## Codex and OpenCode Go quota
-
-Codex quota support is experimental because the ChatGPT usage endpoint and Codex app-server RPC are not public stable APIs.
-
-| Source | Behavior |
-| --- | --- |
-| `oauth` | Reads the local Codex auth file and calls the ChatGPT Codex usage endpoint. This is the default. |
-| `rpc` | Starts `codex -s read-only -a untrusted app-server` and calls `account/rateLimits/read`. |
-| `auto` | Tries OAuth first, then app-server RPC. |
-| `off` | Disables native quota lookup. |
-
-Check the current value directly:
-
-```sh
-npx discord-coding-status quota --source oauth
-```
-
-Quota refreshes run in the background for the `quota`/`status` commands only. A slow or unavailable endpoint cannot block a hook model update from reaching Discord, and presence never displays quota: after the first successful refresh, the engine keeps the last known value in daemon memory during temporary failures and replaces it only when fresh quota arrives.
-
-OAuth access and refresh tokens are read from your local Codex auth file. They are used only with the relevant OpenAI authentication/usage endpoints and are never included in Discord Rich Presence.
-
-## Cursor quota
-
-Cursor quota reads the session token Cursor writes locally when you are signed into the Cursor app (or `cursor agent login`):
-
-- **macOS:** `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` (SQLite), with a Keychain fallback.
-- **Windows:** `%APPDATA%\Cursor\User\globalStorage\state.vscdb`.
-- **Linux:** `~/.config/Cursor/User/globalStorage/state.vscdb`.
-
-It queries Cursor's Connect-RPC dashboard endpoint (`api2.cursor.sh`) for `GetCurrentPeriodUsage`, then the command below prints the plan name and remaining percentage/requests (presence itself stays model-only):
-
-```sh
-npx discord-coding-status quota --tool cursor
-```
-
-Cursor is only a desktop/CLI presence provider and has no native lifecycle hooks. Its quota lookup is optional and fail-closed: `quota --tool cursor` reports only when a valid local Cursor login is found. To disable it, set `DISCORD_CODING_STATUS_CURSOR_QUOTA_SOURCE=off`.
-
-## Claude quota and model detection
-
-Managed Claude hooks read only the raw model ID from hook metadata or the bounded tail of the referenced local transcript. Prompt and response content is not copied into state, logs, quota requests, or Discord activity. A model change is picked up on the next managed event; an incomplete transcript keeps the last-known model for that session.
-
-For a compatible Claude subscription login, check the quota text from the terminal (presence itself never shows quota):
-
-```sh
-npx discord-coding-status quota --tool claude
-```
-
-Claude quota reads Claude Code OAuth credentials from the macOS Keychain first and `$CLAUDE_CONFIG_DIR/.credentials.json` (default `~/.claude/.credentials.json`) second. It requests only Anthropic's fixed OAuth usage/refresh hosts, refreshes every five minutes, honors `Retry-After`, and keeps the last successful value only in daemon memory.
-
-Quota is fail-closed: Anthropic API-key mode (including `apiKeyHelper`), `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, a custom `ANTHROPIC_BASE_URL`, Bedrock, Vertex, Foundry, Mantle, and Anthropic-on-AWS modes can still show Claude's recorded raw model but never use stored subscription OAuth credentials or display Claude subscription quota. Tokens with explicit scopes must include `user:profile`.
-
-## Codex hooks
-
-Install, inspect, or remove only the hooks managed by this project:
-
-```sh
-npx discord-coding-status hooks setup codex
-npx discord-coding-status hooks status codex
-npx discord-coding-status hooks uninstall codex
-```
-
-The installer merges hooks into `~/.codex/hooks.json` for:
-
-- `SessionStart`
-- `UserPromptSubmit`
-- `PreToolUse`
-- `PermissionRequest`
-- `PostToolUse`
-- `Stop`
-
-Native Codex hooks provide the active model. The daemon also reads the latest local `turn_context` entry referenced by the hook transcript, but Rich Presence shows only the raw model id (for example `Model: gpt-5.6-sol`); reasoning effort is never displayed. Transcript prompts and responses are not included in Discord activity.
-
-Existing hook configuration is preserved, and the previous file is backed up as `hooks.json.bak` before a change is written.
-
-## Claude hooks
-
-Install, inspect, disable, or remove only the hooks managed by this project:
-
-```sh
-npx discord-coding-status hooks setup claude
-npx discord-coding-status hooks status claude
-npx discord-coding-status hooks uninstall claude
-```
-
-The installer merges nine lifecycle events into `$CLAUDE_CONFIG_DIR/settings.json` (default `~/.claude/settings.json`). Each owned command contains `--managed-by=discord-coding-status`; status and uninstall use that marker, preserving unrelated settings, hook groups, and commands. The previous settings file is backed up as `settings.json.bak` before a write.
-
-## Grok Code hooks
-
-Install, inspect, disable, or remove only the hooks managed by this project:
-
-```sh
-npx discord-coding-status hooks setup grok
-npx discord-coding-status hooks status grok
-npx discord-coding-status hooks uninstall grok
-```
-
-Grok hooks are written to `~/.grok/hooks/discord-coding-status.json` as passive, globally-trusted hooks that report session activity (status, tool, project) to the daemon. They never block the agent and need no manual approval.
-
-## Muse Code hooks
-
-Install, inspect, disable, or remove only the hooks managed by this project:
-
-```sh
-npx discord-coding-status hooks setup muse
-npx discord-coding-status hooks status muse
-npx discord-coding-status hooks uninstall muse
-```
-
-The installer merges five lifecycle events (`SessionStart`, `UserPromptSubmit`,
-`PreLLMCall`, `PostLLMCall`, `SessionEnd`) into the standalone Muse user
-settings (`$XDG_CONFIG_HOME/muse/settings.json`, default
-`~/.config/muse/settings.json`), preserving unrelated settings and hook groups
-and backing the previous file up as `settings.json.bak`. No plugin install or
-trust change is involved; hooks load at session startup, so restart running
-Muse sessions after installing them.
-
-Each hook event reports only its session id and current model, and the
-receiver binds the session to its owning Muse process (PID + creation time
-from its own ancestor chain). When several Muse sessions are alive, only the
-instance hosted by the focused console shows its model; focusing Discord or an
-unrelated window retains that same instance, and shared terminal panes or a
-focused-but-silent TUI stay application name only instead of guessing. A model
-switch on the same session publishes on the next model event with no focus
-change. Prompts, tool data, and transcript content are never read.
-
-### Generic hook input
-
-Local wrappers can publish exact state for Codex, Claude Code, or another tool:
-
-```sh
-npx discord-coding-status hook \
-  --tool claude \
-  --surface cli \
-  --status running \
-  --session-id my-session \
-  --cwd "$PWD" \
-  --activity "Working with Claude Code"
-```
-
-Optional fields include `--model`, `--effort`, and `--context`, but presence shows only the raw `--model` value (application name only when no model is known). No emoji, status text, session counts, project, or quota ever reach Discord. The bundled Pi extension (`pi` session reporting) sends model, thinking level, and tool activity automatically; without it, process detection still shows Pi, OpenCode, and other provider families by application name only.
-
-Inspect or clear local sessions:
-
-```sh
-npx discord-coding-status state
-npx discord-coding-status clear --session-id my-session
-```
-
-Concurrent hook writes use a lock plus atomic file replacement so burst updates do not corrupt the state file.
-
-## CLI reference
-
-| Command | Description |
-| --- | --- |
-| `setup` | Install the runtime/startup entry, start the daemon, and auto-install detected Codex, Claude, Grok, and Muse hooks. |
-| _(no command)_ | Open the interactive menu. Falls back to this help when stdin/stdout is not a terminal. |
-| `config` | Open the display TUI with a live two-line Discord preview. |
-| `config --advanced` | Edit advanced path, text, and image overrides with prompts. |
-| `config --preview` | Print the current two-line preview without opening the TUI. |
-| `config --no-restart` | Save config without restarting a managed daemon. |
-| `daemon` | Run the Rich Presence daemon in the foreground. |
-| `status` | Print a combined dashboard: services, installed AI tools, OAuth quotas, and live hook activities. |
-| `uninstall` | Remove the managed startup entry and installed runtime. |
-| `hooks setup [harness...]` | Install lifecycle hooks. With no harness, every detected harness. |
-| `hooks uninstall [harness...]` | Remove only hooks installed by this project. |
-| `hooks status [harness...]` | Print managed hook status for each harness as JSON. |
-| `quota [--source SOURCE]` | Read and print Codex plan/quota information (backward-compatible default). |
-| `quota --tool claude` | Read and print eligible Claude subscription plan/Session/Weekly quota. |
-| `quota --tool grok` | Read and print Grok Code weekly pool / pay-as-you-go billing quota. |
-| `quota --tool cursor` | Read and print Cursor plan usage and remaining quota. |
-| `quota --tool opencode` | Read and print OpenCode Go session/weekly/monthly usage. |
-| `hook --tool TOOL ...` | Write or update a local session state. |
-| `codex-hook --event EVENT` | Receive a native Codex lifecycle event. |
-| `claude-hook --event EVENT` | Receive a native Claude lifecycle event. |
-| `muse-hook --event EVENT` | Receive a native Muse lifecycle event. |
-| `state` | Print current sanitized, non-expired session state. |
-| `clear --session-id ID` | Remove one local session. |
-| `--help` / `--version` | Print CLI help or version. |
-
-Useful setup flags:
-
-| Flag | Effect |
-| --- | --- |
-| `--codex-hooks` | Force Codex hook installation. |
-| `--no-codex-hooks` | Skip Codex hook installation. |
-| `--claude-hooks` | Force Claude hook installation. |
-| `--no-claude-hooks` | Skip Claude hook installation. |
-| `--grok-hooks` | Force Grok hook installation. |
-| `--no-grok-hooks` | Skip Grok hook installation. |
-| `--muse-hooks` | Force Muse hook installation. |
-| `--no-muse-hooks` | Skip Muse hook installation. |
-| `--codex-quota-source SOURCE` | Persist the selected quota source during setup. |
-| `--no-start` | Install startup without starting it immediately. |
-| `--dry-run` | Print detected paths and planned actions without installing. |
-| `uninstall --purge` | Also remove local configuration and state data. |
-
-## Platform behavior
-
-| Platform | Startup mechanism | Logs |
-| --- | --- | --- |
-| macOS | `~/Library/LaunchAgents/io.github.discord-coding-status.daemon.plist` | `~/Library/Logs/discord-coding-status/` |
-| Windows | User Scheduled Task named `DiscordCodingStatus` | `%LOCALAPPDATA%\discord-coding-status\logs\` |
-| Linux | Run `discord-coding-status daemon` manually or use your own service manager | Standard output/error |
-
-Runtime state is stored in `~/discord-coding-status/` on every platform unless overridden.
-
-## Privacy and security
-
-- Discord receives short, sanitized Rich Presence strings, not prompt text, full paths, account emails, secrets, repository URLs, or raw command lines.
-- `safe` mode hides repository, branch, package, and quota metadata.
-- Hook/runtime state remains in the local state file; stale sessions expire automatically.
-- Discord activity is sent through the local Desktop RPC/IPC connection.
-- Codex quota contacts the configured OpenAI authentication/usage endpoint. Eligible Claude quota contacts only `api.anthropic.com` and `platform.claude.com`; Claude OAuth tokens are never sent to a custom base URL, gateway, router, or Discord.
-- Claude transcript parsing selects only model metadata from a bounded local tail and never persists raw transcript lines.
-- No Discord bot token, public HTTP listener, hosted backend, or telemetry service is required.
-
-Please report sensitive issues according to [SECURITY.md](./SECURITY.md).
+After editing the file, run `node dist/cli.js setup` again: it restarts the background program and
+keeps your settings.
 
 ## Troubleshooting
 
-### Discord shows no activity
+| Problem | Fix |
+| --- | --- |
+| Nothing on Discord | Use the Discord Desktop app, not the browser, and turn on activity sharing in User Settings → Activity Privacy. |
+| The card shows the tool but no model | The model could not be proven yet. Send one prompt in that tool, or pick a model in its picker. |
+| Codex updates are late | Run `/hooks` in Codex and trust the Discord Coding Status hooks. |
+| A tool never appears | Without hooks, a tool counts only while it is busy or its window is in front; send it a prompt. If you installed the tool after this program, run `node dist/cli.js setup` again to add its hooks. |
+| Anything else | Read the logs (below), then open an issue with the last lines. |
 
-1. Make sure **Discord Desktop** is open and signed in; the browser client does not provide local RPC.
-2. Confirm startup is installed:
+Logs:
 
-   ```sh
-   npx discord-coding-status status
-   ```
+| System | Folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\discord-coding-status\logs\` |
+| macOS | `~/Library/Logs/discord-coding-status/` |
 
-3. For Codex, confirm all six hooks are installed:
+<details>
+<summary>Terminal-only extras</summary>
 
-   ```sh
-   npx discord-coding-status hooks status codex
-   ```
-
-   For Claude Code, confirm all nine managed hooks are installed:
-
-   ```sh
-   npx discord-coding-status hooks status claude
-   ```
-
-   For Grok Code, confirm all managed hooks are installed:
-
-   ```sh
-   npx discord-coding-status hooks status grok
-   ```
-
-4. Open Codex, run `/hooks`, and trust the Discord Coding Status hooks.
-5. Submit a new prompt or run a tool so the session emits a fresh lifecycle event.
-6. Run the daemon in the foreground to see connection errors directly:
-
-   ```sh
-   npx discord-coding-status daemon
-   ```
-
-### Hooks are installed but do not update
-
-Reinstall the current runtime and hooks, then review the Codex hooks again in Codex:
+These print in your terminal and never reach Discord:
 
 ```sh
-npx discord-coding-status setup --codex-hooks --claude-hooks --grok-hooks
+node dist/cli.js quota                # Codex plan and limits
+node dist/cli.js quota --tool claude  # Claude subscription limits
+node dist/cli.js quota --tool grok
+node dist/cli.js quota --tool cursor
+node dist/cli.js quota --tool opencode
+node dist/cli.js state                # stored hook sessions
 ```
 
-The daemon watches the state directory, so changes normally arrive without waiting for the polling interval.
+`quota` contacts the vendor's own usage endpoint with the login that tool already saved on your
+computer. Nothing is sent anywhere else.
 
-### Quota is unavailable
+</details>
 
-Verify the quota path independently:
+## Update
 
 ```sh
-npx discord-coding-status quota --source oauth
-npx discord-coding-status quota --tool claude
-npx discord-coding-status quota --tool grok
-npx discord-coding-status quota --tool cursor
-npx discord-coding-status quota --tool opencode
-```
-
-For Codex, make sure `~/.codex/auth.json` exists. For Claude, sign in through Claude Code with subscription OAuth and ensure the active session is not using an API key, environment token, custom base URL, or cloud provider. Claude quota intentionally remains hidden in those modes while model display continues. For Grok, ensure you are signed into Grok Code. For Cursor, sign into the Cursor app (or `cursor agent login`) so a local session token exists. For OpenCode, set `DISCORD_CODING_STATUS_OPENCODE_API_KEY` and `DISCORD_CODING_STATUS_OPENCODE_GO_AUTH_FILE`.
-
-If you do not want Codex quota lookup, disable it without disabling Rich Presence:
-
-```json
-{
-  "quotaSource": "off"
-}
-```
-
-### Inspect logs
-
-macOS:
-
-```sh
-tail -f ~/Library/Logs/discord-coding-status/discord-coding-status.log
-tail -f ~/Library/Logs/discord-coding-status/discord-coding-status.error.log
-```
-
-Windows logs are written under:
-
-```text
-%LOCALAPPDATA%\discord-coding-status\logs\
-```
-
-### Remove everything
-
-Remove managed hooks before deleting the installed runtime they reference:
-
-```sh
-npx discord-coding-status hooks uninstall codex
-npx discord-coding-status hooks uninstall claude
-npx discord-coding-status hooks uninstall grok
-npx discord-coding-status uninstall --purge
-```
-
-## Run from source
-
-```sh
+git pull
 npm ci
 npm run build
-node dist/cli.js setup --codex-hooks
+node dist/cli.js setup
 ```
 
-Run without installing startup:
+Your config and sessions are kept. If Codex says its hooks changed, trust them again with `/hooks`.
+
+## Uninstall
+
+Remove the hooks first, while the program they point to still exists:
 
 ```sh
-node dist/cli.js daemon
+node dist/cli.js hooks uninstall
+node dist/cli.js uninstall --purge
 ```
 
-Test the local package entrypoint:
+`uninstall` stops the background program and removes start-at-login and the copied program; then
+you can delete the folder. `--purge` also deletes `~/discord-coding-status/` (config and sessions).
+Only the hooks this project added are removed and your own hooks and settings stay. Codex, Claude Code, Muse Code and Antigravity
+keep their previous file as a `.bak` copy; Grok Code's hooks live in a file of their own.
 
-```sh
-npx . --help
-npx . setup --dry-run
-```
+## Privacy
+
+- Discord receives the tool's name and the model line, through Discord Desktop on your own computer.
+- Prompts, replies, files, folder names, branches, accounts and quotas are never sent to Discord.
+- Hook data stays in a local file on your computer. Prompt and reply text is never stored.
+- To name Antigravity's models, the program asks Antigravity's own language server on `127.0.0.1`.
+  The background program makes no other network requests.
+- No telemetry, no server, no Discord bot token.
+
+Report security problems as described in [SECURITY.md](./SECURITY.md).
 
 ## Development
 
-Detection code is split by responsibility:
-
-| Module | Responsibility |
-| --- | --- |
-| `src/cli.ts` | CLI commands and daemon orchestration |
-| `src/commands/` | Command handlers and command-specific policy/types |
-| `src/core/` | Pure tool, detection, hook, presence, and quota contracts/logic |
-| `src/providers/` | Capability declarations and the built-in provider registry (Codex, Claude, Grok, OpenCode, Pi, Cursor) |
-| `src/providers/cursor/` | Cursor detection, presence, and local SQLite/Keychain OAuth quota |
-| `src/adapters/system/installed-tools.ts` | Installed CLI/desktop discovery |
-| `src/adapters/system/processes.ts` | macOS/Windows process enumeration |
-| `src/core/detection/active-tools.ts` | Active-tool selection policy |
-| `src/core/detection/tool-detection.ts` | Pure Codex/Claude/Grok/OpenCode/Pi/Cursor process classifiers |
-
-Dependencies point inward: commands and adapters may import core modules, while core modules do not import commands or platform adapters. Domain types live beside their owning feature instead of in a global types file.
-
-See [Adding a tool provider](./docs/adding-a-tool-provider.md) for the provider contract, supported installation probes, Discord environment conventions, and a complete extension example.
-
 ```sh
 npm ci
-npm test
+npm test                  # build + full suite, no Discord needed
 npm run test:integration
 npm run test:stress
-npm pack --dry-run
 ```
 
-`npm test` builds TypeScript and runs quota, hook-to-Discord, clear, and concurrent state-writer coverage through a local fake RPC transport. No Discord Desktop session is required for automated tests.
+Tests use a fake local Discord connection, so they run anywhere. CI runs Node.js 20 and 22 on Linux,
+and Node.js 22 on macOS and Windows.
 
-CI covers Node.js 18, 20, and 22 on Linux, plus Node.js 20 on macOS and Windows.
+| Folder | What lives there |
+| --- | --- |
+| `src/providers/<tool>/` | Each tool: detection, Discord identity, model reader |
+| `src/core/` | Tool-neutral detection, hooks and presence logic |
+| `src/adapters/` | Operating-system access (processes, startup) |
+| `src/commands/` | The CLI commands |
+| `src/presence.ts`, `src/daemon.ts` | Turning the active tool into one Discord activity |
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for pull-request expectations and local manual checks.
+To add a tool, see [docs/adding-a-tool-provider.md](./docs/adding-a-tool-provider.md). Pull requests
+are welcome; see [CONTRIBUTING.md](./CONTRIBUTING.md).
 
-## Release
+## Credits and license
 
-Configure the repository secret `NPM_TOKEN` and add yourself as a required reviewer for the `npm-production` GitHub Environment. Start **Actions → Release candidate to npm → Run workflow** with a semantic version such as `1.3.0`.
+Maintained by [u2n4](https://github.com/u2n4). Originally based on
+[howznguyen/discord-coding-status](https://github.com/howznguyen/discord-coding-status) by Howz
+Nguyen, which this project has since rewritten around the model-only display and more tools.
 
-The workflow updates `package.json` and `package-lock.json`, runs the full test and package checks, commits and tags the version, uploads the package artifact, and creates a draft GitHub Release. It then waits at the `npm-production` approval gate. Nothing is published to npm or as a public GitHub Release before approval. After approval, the exact staged tarball is published to npm with provenance and the draft GitHub Release becomes public. A failed build or publish remains visible in GitHub Actions for retry and does not publish the GitHub Release.
-
-Stable releases publish under npm's `latest` dist-tag. Prereleases such as `v1.3.0-beta.1` publish under `next`.
-
-## License
-
-[MIT](./LICENSE) © 2026 Howz Nguyen and contributors.
+[MIT](./LICENSE).

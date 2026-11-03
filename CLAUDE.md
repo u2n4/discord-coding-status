@@ -1,4 +1,4 @@
-# discord-coding-status (Ali's minimal-display build)
+# discord-coding-status (minimal-display build)
 
 Repo: https://github.com/u2n4/discord-coding-status (standalone since 2026-11-03).
 Originally based on https://github.com/howznguyen/discord-coding-status (v1.6.1, MIT; credit stays in LICENSE).
@@ -15,7 +15,7 @@ Model: <app label>     <- details line, or absent when the model is unknown
 Never sent: `startTimestamp`, activity, status, project, branch, package,
 quota, context, effort, emoji, session counts. `SHOW_*`, detail levels, and
 activity styles in config are inert. The model is resolved from evidence
-(never guessed), then shown the way the tool itself writes it (Ali,
+(never guessed), then shown the way the tool itself writes it (since
 2026-11-03): `src/providers/model-label.ts` maps a resolved id to the tool's
 own label, from the tool's model list where one exists (Codex and Grok
 `models_cache.json`, `agy models`), effort brackets dropped: "Opus 5.5",

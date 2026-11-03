@@ -14,6 +14,7 @@ const {
   findToolProviderByAlias,
   toolProviders
 } = require('../dist/providers/registry');
+const { DEFAULT_MUSE_CLIENT_ID } = require('../dist/providers/muse/provider');
 const { resolveDiscordApplications } = require('../dist/providers/discord');
 const {
   readActiveMuseModel,
@@ -107,7 +108,8 @@ test('the Muse provider registers a Muse Code Discord identity', () => {
   const muse = applications.get('muse');
   assert.ok(muse);
   assert.equal(muse.label, 'Muse Code');
-  assert.equal(muse.clientId, '', 'no shared Muse application ships a default ID');
+  assert.equal(muse.clientId, DEFAULT_MUSE_CLIENT_ID, 'the shared Muse Code application ships as the default');
+  assert.match(DEFAULT_MUSE_CLIENT_ID, /^\d{17,20}$/);
   assert.equal(muse.clientIdEnvironment, 'DISCORD_CODING_STATUS_MUSE_CLIENT_ID');
 
   const configured = resolveDiscordApplications(

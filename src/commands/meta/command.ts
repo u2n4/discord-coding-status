@@ -18,6 +18,7 @@ export interface MetaCommandContext {
   grokClientId: string;
   cursorClientId: string;
   museClientId: string;
+  antigravityClientId: string;
   configFile: string;
   stateFile: string;
 }
@@ -27,7 +28,7 @@ export function renderMetaHelp(context: MetaCommandContext): string {
   const commandText = (value: string): string => pc.bold(value);
 
   return `${pc.bold(pc.cyan(context.appTitle))} ${context.version} ${pc.dim(`by ${context.author}`)}
-${pc.dim('Local Discord Rich Presence for Codex and Claude Code.')}
+${pc.dim('Shows the AI coding tool you are using, and its model, in your Discord status.')}
 
 ${pc.bold('Usage:')}
   discord-coding-status                       Open the interactive menu (on a terminal)
@@ -65,6 +66,7 @@ ${pc.bold('Default Discord Application IDs:')}
   Grok: ${accent(context.grokClientId)}
   Cursor: ${accent(context.cursorClientId)}
   Muse Code: ${accent(context.museClientId)}
+  Antigravity: ${accent(context.antigravityClientId)}
 
 ${pc.bold('Config file:')}
   ${accent(context.configFile)}
@@ -79,16 +81,12 @@ ${pc.bold('Project:')}
   License: ${accent(context.license)}
 
 ${pc.bold('Examples:')}
-  ${commandText('npx -y discord-coding-status@latest')}
-  ${commandText('npx -y discord-coding-status@latest setup')}
-  ${commandText('npx -y discord-coding-status@latest config')}
-  ${commandText('discord-coding-status config --preview')}
-  ${commandText('npx -y discord-coding-status@latest setup --no-grok-hooks')}
+  ${commandText('discord-coding-status setup')}
+  ${commandText('discord-coding-status setup --no-grok-hooks')}
   ${commandText('discord-coding-status hooks setup codex grok')}
   ${commandText('discord-coding-status hooks status')}
   ${commandText('discord-coding-status status')}
   ${commandText('discord-coding-status daemon')}
-  ${commandText('DISCORD_CODING_STATUS_DETAIL_LEVEL=project discord-coding-status state')}
   ${commandText('discord-coding-status quota --source oauth')}
   ${commandText('discord-coding-status quota --tool claude')}
 `;
