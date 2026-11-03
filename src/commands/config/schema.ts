@@ -1,6 +1,6 @@
 'use strict';
 
-import type { ActivityStyle, ConfigEditorField, ConfigTuiItem } from './types';
+import type { ActivityStyle, ConfigEditorField } from './types';
 
 export const DEFAULT_DETAIL_LEVEL = 'project';
 export const DEFAULT_CODEX_QUOTA_SOURCE = 'oauth';
@@ -52,123 +52,40 @@ export const BOOLEAN_CONFIG_KEYS = new Set([
   'DISCORD_CODING_STATUS_SHOW_PACKAGE'
 ]);
 
-export function createConfigEditorFields(defaultStateFile: string): ConfigEditorField[] {
+export interface ConfigEditorApplication {
+  label: string;
+  clientIdEnvironment: string;
+  clientId: string;
+}
+
+// Only settings that change something. Discord shows the tool's application
+// name and one model line, so display, detail-level and activity-style
+// settings are not offered.
+export function createConfigEditorFields(
+  defaultStateFile: string,
+  applications: readonly ConfigEditorApplication[]
+): ConfigEditorField[] {
   return [
-    {
-      key: 'DISCORD_CODING_STATUS_DETAIL_LEVEL',
-      label: 'Detail level',
-      defaultValue: DEFAULT_DETAIL_LEVEL,
-      choices: ['project', 'safe', 'full']
-    },
-    {
-      key: 'DISCORD_CODING_STATUS_CODEX_QUOTA_SOURCE',
-      label: 'Codex quota source',
-      defaultValue: DEFAULT_CODEX_QUOTA_SOURCE,
-      choices: ['oauth', 'auto', 'rpc', 'off']
-    },
-    {
-      key: 'DISCORD_CODING_STATUS_ACTIVITY_STYLE',
-      label: 'Activity style',
-      defaultValue: DEFAULT_ACTIVITY_STYLE,
-      choices: ['fun', 'normal', 'technical', 'minimal']
-    },
-    {
-      key: 'DISCORD_CODING_STATUS_PLAN_TEXT',
-      label: 'Plan override',
-      defaultValue: ''
-    },
-    {
-      key: 'DISCORD_CODING_STATUS_LIMITS_TEXT',
-      label: 'Limits override',
-      defaultValue: ''
-    },
-    {
-      key: 'DISCORD_CODING_STATUS_CODEX_AUTH_FILE',
-      label: 'Codex auth file',
-      defaultValue: DEFAULT_CODEX_AUTH_FILE
-    },
+    ...applications.map((application) => ({
+      key: application.clientIdEnvironment,
+      label: `${application.label} Discord application ID`,
+      defaultValue: application.clientId
+    })),
     {
       key: 'DISCORD_CODING_STATUS_STATE_FILE',
       label: 'State file',
       defaultValue: defaultStateFile
     },
     {
-      key: 'DISCORD_CODING_STATUS_CLAUDE_IMAGE_KEY',
-      label: 'Claude image key',
-      defaultValue: ''
+      key: 'DISCORD_CODING_STATUS_CODEX_QUOTA_SOURCE',
+      label: 'Codex quota source (quota command)',
+      defaultValue: DEFAULT_CODEX_QUOTA_SOURCE,
+      choices: ['oauth', 'auto', 'rpc', 'off']
     },
     {
-      key: 'DISCORD_CODING_STATUS_CODEX_IMAGE_KEY',
-      label: 'Codex image key',
-      defaultValue: ''
-    },
-    {
-      key: 'DISCORD_CODING_STATUS_OPENCODE_CLIENT_ID',
-      label: 'OpenCode client ID',
-      defaultValue: ''
-    },
-    {
-      key: 'DISCORD_CODING_STATUS_OPENCODE_IMAGE_KEY',
-      label: 'OpenCode image key',
-      defaultValue: ''
-    },
-    {
-      key: 'DISCORD_CODING_STATUS_PI_CLIENT_ID',
-      label: 'Pi client ID',
-      defaultValue: ''
-    },
-    {
-      key: 'DISCORD_CODING_STATUS_PI_IMAGE_KEY',
-      label: 'Pi image key',
-      defaultValue: ''
-    },
-    {
-      key: 'DISCORD_CODING_STATUS_MUSE_CLIENT_ID',
-      label: 'Muse client ID',
-      defaultValue: ''
-    },
-    {
-      key: 'DISCORD_CODING_STATUS_PREFER_CODEX_CLI',
-      label: 'Prefer Codex CLI',
-      defaultValue: 'false',
-      choices: ['false', 'true']
+      key: 'DISCORD_CODING_STATUS_CODEX_AUTH_FILE',
+      label: 'Codex auth file (quota command)',
+      defaultValue: DEFAULT_CODEX_AUTH_FILE
     }
   ];
 }
-
-export const CONFIG_TUI_ITEMS: ConfigTuiItem[] = [
-  { key: 'DISCORD_CODING_STATUS_SHOW_ACTIVITY', label: 'Activity', section: 'Top line', kind: 'toggle' },
-  { key: 'DISCORD_CODING_STATUS_SHOW_PROJECT', label: 'Project + branch', section: 'Top line', kind: 'toggle' },
-  { key: 'DISCORD_CODING_STATUS_SHOW_MODEL', label: 'Model + effort', section: 'Bottom line', kind: 'toggle' },
-  { key: 'DISCORD_CODING_STATUS_SHOW_QUOTA', label: 'Plan + quota', section: 'Bottom line', kind: 'toggle' },
-  { key: 'DISCORD_CODING_STATUS_SHOW_CONTEXT', label: 'Context usage', section: 'Bottom line', kind: 'toggle' },
-  { key: 'DISCORD_CODING_STATUS_SHOW_PACKAGE', label: 'Package (package.json)', section: 'Bottom line', kind: 'toggle' },
-  {
-    key: 'DISCORD_CODING_STATUS_DETAIL_LEVEL',
-    label: 'Privacy preset',
-    section: 'Behavior',
-    kind: 'choice',
-    choices: ['safe', 'project', 'full']
-  },
-  {
-    key: 'DISCORD_CODING_STATUS_CODEX_QUOTA_SOURCE',
-    label: 'Codex quota source',
-    section: 'Behavior',
-    kind: 'choice',
-    choices: ['oauth', 'auto', 'rpc', 'off']
-  },
-  {
-    key: 'DISCORD_CODING_STATUS_ACTIVITY_STYLE',
-    label: 'Activity style',
-    section: 'Behavior',
-    kind: 'choice',
-    choices: ['fun', 'normal', 'technical', 'minimal']
-  },
-  {
-    key: 'DISCORD_CODING_STATUS_PREFER_CODEX_CLI',
-    label: 'Prefer Codex CLI',
-    section: 'Behavior',
-    kind: 'choice',
-    choices: ['false', 'true']
-  }
-];

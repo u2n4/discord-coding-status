@@ -20,7 +20,6 @@ import { detectSetupTools } from './adapters/system/installed-tools';
 import { runMetaCommand } from './commands/meta/command';
 import { runMenuCommand } from './commands/menu/command';
 import { runConfigCommand } from './commands/config/command';
-import { runConfigTui, configPreviewLines } from './commands/config/tui';
 import { runAdvancedConfigEditor } from './commands/config/editor';
 import {
   BOOLEAN_CONFIG_KEYS,
@@ -56,8 +55,6 @@ import {
   restartManagedDaemon
 } from './adapters/startup/service';
 import type { DaemonRefreshResult } from './adapters/startup/types';
-import type { ConfigPreviewSamples } from './commands/config/types';
-import type { HookSessionState } from './core/hooks/types';
 import { parseArgs, parsePositionals, getArgString } from './commands/args';
 import { resolveRuntimeInstallCommand } from './core/runtime/install-command';
 import type { SetupHookSummary } from './commands/setup/types';
@@ -122,12 +119,8 @@ import {
   logError
 } from './env';
 import {
-  isTerminalStatus,
   joinPresenceParts,
-  joinMetricParts,
-  sanitizeProjectName,
-  sanitizePackageName,
-  formatContextText
+  joinMetricParts
 } from './presence-text';
 import {
   cleanupStateSessions,
@@ -150,7 +143,6 @@ import {
   getNativeGrokQuotaText,
   getNativeOpencodeQuotaText
 } from './quota';
-import { getGitBranch, readPackageInfo } from './presence';
 import { startDaemon, stopDaemonFromLock } from './daemon';
 
 function getInstallDirectory(): string {
@@ -579,35 +571,6 @@ function writeSetupConfig(args: Record<string, string | boolean>): void {
   fs.writeFileSync(CONFIG_FILE, serializeJsonConfig(next));
 }
 
-function latestConfigPreviewSession(): HookSessionState | null {
-  const sessions = Object.values(readStateFile().sessions)
-    .filter((session) => !isTerminalStatus(session.status))
-    .sort((left, right) => right.updated_at - left.updated_at);
-  return sessions[0] || null;
-}
-
-function createConfigPreviewSamples(): ConfigPreviewSamples {
-  const session = latestConfigPreviewSession();
-  const cwd = session?.cwd || process.cwd();
-  const packageInfo = readPackageInfo(cwd);
-  const projectName = sanitizeProjectName(session?.project)
-    || sanitizeProjectName(packageInfo?.root)
-    || sanitizeProjectName(cwd)
-    || 'my-project';
-  const branchName = getGitBranch(packageInfo?.root || cwd) || 'main';
-  const model = String(session?.model || 'gpt-5.6-sol').trim();
-  const effort = String(session?.effort || 'xhigh').trim();
-
-  return {
-    activity: 'Bash survived the assignment',
-    project: `${projectName} @ ${branchName}`,
-    model: effort ? `${model} · ${effort}` : model,
-    quota: 'Pro • 5h 82% • weekly 54%',
-    context: formatContextText(session?.context) || 'ctx 42%',
-    package: `pkg ${sanitizePackageName(session?.package) || packageInfo?.name || 'my-package'}`
-  };
-}
-
 function printDaemonRefreshResult(result: DaemonRefreshResult): void {
   if (result.status === 'restarted') {
     console.log(success('Daemon restarted. Config is now active.'));
@@ -868,9 +831,7 @@ async function main(): Promise<void> {
     writeConfig: writeConfigEntries,
     serializeConfig: serializeJsonConfig,
     compactEntries: compactConfigEntries,
-    getPreviewLines: (existing) => configPreviewLines(existing, createConfigPreviewSamples()),
-    runTui: (existing) => runConfigTui(existing, createConfigPreviewSamples(), APP_TITLE, CONFIG_FILE),
-    runAdvancedEditor: (existing) => runAdvancedConfigEditor(existing, CONFIG_EDITOR_FIELDS, CONFIG_FILE)
+    runEditor: (existing) => runAdvancedConfigEditor(existing, CONFIG_EDITOR_FIELDS, CONFIG_FILE)
   })) {
     process.exit(process.exitCode || 0);
   }

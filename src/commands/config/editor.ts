@@ -5,13 +5,9 @@ import { createColors } from 'picocolors';
 import type { ConfigEditorField } from './types';
 import {
   DEFAULT_CODEX_AUTH_FILE,
-  DEFAULT_CODEX_QUOTA_SOURCE,
-  DEFAULT_DETAIL_LEVEL
+  DEFAULT_CODEX_QUOTA_SOURCE
 } from './schema';
-import {
-  normalizeCodexQuotaSource,
-  normalizeDetailLevel
-} from './settings';
+import { normalizeCodexQuotaSource } from './settings';
 
 const pc = createColors(Boolean(process.stdout?.isTTY && !process.env.NO_COLOR));
 
@@ -61,7 +57,7 @@ export function printEffectiveConfig(
   fields: ConfigEditorField[],
   configFile: string
 ): void {
-  console.log(pc.bold(pc.cyan('Discord Coding Status advanced config')));
+  console.log(pc.bold(pc.cyan('Discord Coding Status config')));
   console.log(`${pc.bold('File:')} ${pc.cyan(configFile)}`);
   console.log(pc.dim('Enter keeps the current/default value. Use "-" to clear an override.'));
   console.log('');
@@ -101,16 +97,10 @@ export async function runAdvancedConfigEditor(
       }
     }
 
-    const detailLevel = normalizeDetailLevel(
-      updated.DISCORD_CODING_STATUS_DETAIL_LEVEL || DEFAULT_DETAIL_LEVEL
-    );
     const quotaSource = normalizeCodexQuotaSource(
       updated.DISCORD_CODING_STATUS_CODEX_QUOTA_SOURCE || DEFAULT_CODEX_QUOTA_SOURCE
     );
 
-    if (detailLevel === DEFAULT_DETAIL_LEVEL) {
-      delete updated.DISCORD_CODING_STATUS_DETAIL_LEVEL;
-    }
     if (quotaSource === DEFAULT_CODEX_QUOTA_SOURCE) {
       delete updated.DISCORD_CODING_STATUS_CODEX_QUOTA_SOURCE;
     }

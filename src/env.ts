@@ -55,7 +55,10 @@ export const CONFIG_DIR = getConfigDirectory();
 export const CONFIG_FILE = path.join(USER_DATA_DIR, 'config.json');
 export const LEGACY_CONFIG_FILE = path.join(CONFIG_DIR, '.env');
 export const DEFAULT_STATE_FILE = path.join(USER_DATA_DIR, 'states.json');
-export const CONFIG_EDITOR_FIELDS: ConfigEditorField[] = createConfigEditorFields(DEFAULT_STATE_FILE);
+export const CONFIG_EDITOR_FIELDS: ConfigEditorField[] = createConfigEditorFields(
+  DEFAULT_STATE_FILE,
+  [...resolveDiscordApplications(toolProviders, (_name, fallback = '') => fallback).values()]
+);
 export const CODEX_HOME = resolveHomePath(process.env.CODEX_HOME || '~/.codex');
 export const CODEX_HOOKS_FILE = path.join(CODEX_HOME, 'hooks.json');
 export const CLAUDE_CONFIG_DIR = resolveHomePath(process.env.CLAUDE_CONFIG_DIR || DEFAULT_CLAUDE_CONFIG_DIR);

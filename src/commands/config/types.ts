@@ -18,25 +18,3 @@ export interface DisplayLayout {
   context: boolean;
   package: boolean;
 }
-
-export interface ConfigPreviewSamples {
-  activity: string;
-  project: string;
-  model: string;
-  quota: string;
-  context: string;
-  package: string;
-}
-
-export interface ConfigTuiItem {
-  key: string;
-  label: string;
-  section: 'Top line' | 'Bottom line' | 'Behavior';
-  kind: 'toggle' | 'choice';
-  choices?: string[];
-}
-
-export interface ConfigTuiResult {
-  action: 'save' | 'advanced' | 'cancel';
-  entries: Record<string, string>;
-}

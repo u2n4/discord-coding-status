@@ -33,9 +33,9 @@ ${pc.dim('Shows the AI coding tool you are using, and its model, in your Discord
 ${pc.bold('Usage:')}
   discord-coding-status                       Open the interactive menu (on a terminal)
   discord-coding-status setup                 Install startup and start the daemon
-  discord-coding-status config                Open display TUI with live preview
-  discord-coding-status config --advanced     Edit advanced config prompts
-  discord-coding-status config --preview      Print the current two-line preview
+  discord-coding-status config                Set Discord application IDs and paths
+  discord-coding-status config --show         Print the saved config as JSON
+  discord-coding-status config --reset        Reset the config to defaults
   discord-coding-status config --no-restart   Save without restarting the daemon
   discord-coding-status daemon                Start the Discord Rich Presence daemon
   discord-coding-status uninstall             Remove startup entry

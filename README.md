@@ -161,6 +161,9 @@ from). Built-in applications are included for every tool; to use your own, creat
 | `codexClientId`, `claudeClientId`, `antigravityClientId`, `cursorClientId`, `grokClientId`, `museClientId`, `opencodeClientId`, `piClientId` | built in | The Discord application shown for that tool. |
 | `stateFile` | `~/discord-coding-status/states.json` | Where hook sessions are stored. |
 
+Or run `node dist/cli.js config`: it asks for each value, showing the built-in one. Enter keeps a
+value, `-` clears your override.
+
 After editing the file, run `node dist/cli.js setup` again: it restarts the background program and
 keeps your settings.
 

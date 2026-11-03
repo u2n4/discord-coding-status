@@ -16,8 +16,8 @@ export const MENU_ITEMS: readonly MenuItem[] = [
   },
   {
     id: 'config',
-    label: 'Display config',
-    hint: 'Edit what Discord shows, with a live two-line preview',
+    label: 'Config',
+    hint: 'Set your own Discord application IDs and paths',
     argv: ['config'],
     section: 'Get started'
   },

@@ -9,39 +9,41 @@ const {
   runCli
 } = require('./helpers');
 
-test('config preview reflects persisted display visibility controls', async (t) => {
+test('config outside a terminal points to the script-friendly flags', async (t) => {
   const { directory, env: baseEnv } = createTestEnvironment(t);
   const env = {
     ...baseEnv,
     HOME: directory,
     USERPROFILE: directory
   };
-  const configDirectory = path.join(directory, 'discord-coding-status');
-  fs.mkdirSync(configDirectory, { recursive: true });
-  fs.writeFileSync(path.join(configDirectory, 'config.json'), `${JSON.stringify({
-    showActivity: true,
-    showProject: true,
-    showModel: false,
-    showQuota: false,
-    showContext: true,
-    activityStyle: 'normal',
-    showPackage: true
-  }, null, 2)}\n`);
 
-  const preview = await runCli(['config', '--preview'], env);
-  assert.match(preview.stdout, /Top: Running a command \| [^\r\n]+ @ [^\r\n]+/);
-  assert.doesNotMatch(preview.stdout, /Bash survived the assignment/);
-  assert.match(preview.stdout, /Bottom: ctx 42% \| pkg discord-coding-status/);
-  assert.doesNotMatch(preview.stdout, /gpt-5\.6-sol|weekly 54%/);
-  assert.equal(preview.stderr, '');
+  await assert.rejects(runCli(['config'], env), /config --show` or `config --reset`/);
+});
 
-  const shown = await runCli(['config', '--show'], env);
-  const config = JSON.parse(shown.stdout);
-  assert.equal(config.showModel, false);
-  assert.equal(config.showQuota, false);
-  assert.equal(config.showContext, true);
-  assert.equal(config.activityStyle, 'normal');
-  assert.equal(config.showPackage, true);
+test('the config editor offers only settings that change something', () => {
+  const { CONFIG_EDITOR_FIELDS } = require('../dist/env');
+  const { DEFAULT_ANTIGRAVITY_CLIENT_ID, DEFAULT_CODEX_CLIENT_ID } = require('../dist/providers/registry');
+  const byKey = new Map(CONFIG_EDITOR_FIELDS.map((field) => [field.key, field]));
+
+  for (const tool of ['CODEX', 'CLAUDE', 'ANTIGRAVITY', 'CURSOR', 'GROK', 'MUSE', 'OPENCODE', 'PI']) {
+    const field = byKey.get(`DISCORD_CODING_STATUS_${tool}_CLIENT_ID`);
+    assert.ok(field, `${tool} application ID is editable`);
+    assert.match(field.defaultValue, /^\d{17,20}$/, `${tool} shows its built-in ID`);
+  }
+  assert.equal(byKey.get('DISCORD_CODING_STATUS_CODEX_CLIENT_ID').defaultValue, DEFAULT_CODEX_CLIENT_ID);
+  assert.equal(byKey.get('DISCORD_CODING_STATUS_ANTIGRAVITY_CLIENT_ID').defaultValue, DEFAULT_ANTIGRAVITY_CLIENT_ID);
+  assert.ok(byKey.has('DISCORD_CODING_STATUS_STATE_FILE'));
+
+  for (const inert of [
+    'DISCORD_CODING_STATUS_DETAIL_LEVEL',
+    'DISCORD_CODING_STATUS_ACTIVITY_STYLE',
+    'DISCORD_CODING_STATUS_PLAN_TEXT',
+    'DISCORD_CODING_STATUS_LIMITS_TEXT',
+    'DISCORD_CODING_STATUS_PREFER_CODEX_CLI',
+    'DISCORD_CODING_STATUS_SHOW_ACTIVITY'
+  ]) {
+    assert.equal(byKey.has(inert), false, `${inert} is not offered`);
+  }
 });
 
 test('config reset restarts an installed macOS launch agent unless disabled', {
