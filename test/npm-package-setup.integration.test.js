@@ -45,7 +45,7 @@ test('setup from a packed npm install creates a self-contained runtime', {
     stdio: 'pipe'
   });
 
-  const packageRoot = path.join(consumer, 'node_modules', 'discord-coding-status');
+  const packageRoot = path.join(consumer, 'node_modules', '@u2n4', 'discord-coding-status');
   const packageCli = path.join(packageRoot, 'dist', 'cli.js');
   assert.equal(
     fs.existsSync(path.join(packageRoot, 'node_modules')),
