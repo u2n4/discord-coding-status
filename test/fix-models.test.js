@@ -275,6 +275,9 @@ test('Claude Desktop shows the session last used, whatever idle sessions run', (
   assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet, activeOpus]), 'Opus 5.5');
   // With no model anywhere for that session, an idle session never stands in.
   assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), null);
+  // A value no tool would write is no model at all.
+  record('active', { cliSessionId: 'active', model: 'not a model', latestUserFrameAt: now - 4_000 });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), null);
 
   // A file caught mid-write may be the session in use, so an older one never stands in.
   record('active', '{"cliSessionId":"act');
@@ -371,13 +374,33 @@ test('Claude Desktop records are read from AppData and from the Store package', 
   // A running Desktop names its own data folder, even with an older stamp there.
   const dataDir = path.join(root, 'claude-data', 'claude_test');
   writeJson(path.join(dataDir, 'claude-code-sessions', 'account', 'organization', 'local_3.json'), { cliSessionId: 'running', latestUserFrameAt: 500 });
-  const running = (exe, args) => [{ pid: 9, ppid: 1, executablePath: exe, commandLine: `"${exe}" ${args}`, line: `${exe} ${args}` }];
+  const desktopPid = 7;
   const desktopExe = 'C:\\Claude\\app\\Claude.exe';
-  assert.equal(readLastUsedClaudeDesktopSession(running(desktopExe, `--type=renderer --user-data-dir="${dataDir}" --lang=en`))?.sessionId, 'running');
-  assert.equal(readLastUsedClaudeDesktopSession(running(desktopExe, `--type=gpu-process --user-data-dir=${dataDir} --lang=en`))?.sessionId, 'running');
-  // Another Electron app's data folder is not Claude's, and a helper without the flag says nothing.
-  assert.equal(readLastUsedClaudeDesktopSession(running('C:\\Discord\\Discord.exe', `--user-data-dir=${dataDir}`))?.sessionId, 'store');
-  assert.equal(readLastUsedClaudeDesktopSession(running(desktopExe, '--type=utility'))?.sessionId, 'store');
+  const running = (exe, args, ppid = desktopPid) => [
+    { pid: desktopPid, ppid: 1, executablePath: desktopExe, commandLine: `"${desktopExe}"`, line: desktopExe },
+    { pid: 9, ppid, executablePath: exe, commandLine: `"${exe}" ${args}`, line: `${exe} ${args}` }
+  ];
+  const usedSession = (exe, args, ppid) => readLastUsedClaudeDesktopSession(desktopPid, running(exe, args, ppid))?.sessionId;
+  assert.equal(usedSession(desktopExe, `--type=renderer --user-data-dir="${dataDir}" --lang=en`), 'running');
+  assert.equal(usedSession(desktopExe, `--type=gpu-process --user-data-dir=${dataDir} --lang=en`), 'running');
+  // A helper without the flag says nothing, and neither does any other program.
+  assert.equal(usedSession(desktopExe, '--type=utility'), 'store');
+  assert.equal(usedSession('C:\\Discord\\Discord.exe', `--type=utility --user-data-dir=${dataDir}`), 'store');
+  // A terminal Claude Code, or the same binary outside this Desktop, may carry the text in a prompt.
+  assert.equal(usedSession('C:\\npm\\claude.exe', `--type=utility --user-data-dir=${dataDir}`), 'store');
+  assert.equal(usedSession(desktopExe, `--type=utility --user-data-dir=${dataDir}`, 1), 'store');
+  // Only a helper counts, and only a whole argument.
+  assert.equal(usedSession(desktopExe, `--user-data-dir=${dataDir}`), 'store');
+  assert.equal(usedSession(desktopExe, `--type=utility --note=x--user-data-dir=${dataDir}`), 'store');
+  assert.equal(usedSession(desktopExe, `--type=utility --note="text --user-data-dir=${dataDir}"`), 'store');
+  // A network or device path is never read.
+  assert.equal(usedSession(desktopExe, '--type=utility --user-data-dir=\\\\host\\share'), 'store');
+  assert.equal(usedSession(desktopExe, '--type=utility --user-data-dir=//host/share'), 'store');
+  assert.equal(usedSession(desktopExe, '--type=utility --user-data-dir="\\\\?\\C:\\data"'), 'store');
+  if (process.platform === 'win32') {
+    assert.equal(usedSession(desktopExe, '--type=utility --user-data-dir="/\\host/share"'), 'store');
+    assert.equal(usedSession(desktopExe, '--type=utility --user-data-dir="/\\?\\UNC\\host\\share"'), 'store');
+  }
 });
 
 test('an idle CLI under the focused window still counts as active and wins its provider', (t) => {

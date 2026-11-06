@@ -33,25 +33,34 @@ let cache = new Map<string, CachedSession>();
 
 // A running Desktop names its data folder on its command line. Version
 // 4.23118 moved that folder, so the live value comes before any fixed path.
-function runningDataDirs(processes: ProcessInfo[]): string[] {
+// Only Desktop's Chromium helpers count, and only as a whole argument with a
+// local path. Another claude.exe can carry this text inside a prompt, Desktop's
+// own command line can carry a link it was opened with, and reading a network
+// path would make Windows authenticate to that host.
+function runningDataDirs(desktopPid: number, processes: ProcessInfo[]): string[] {
+  const exe = (proc?: ProcessInfo) => String(proc?.executablePath || '').trim().toLowerCase();
+  const desktopExe = exe(processes.find((proc) => proc.pid === desktopPid));
+  const localPath = process.platform === 'win32' ? /^[A-Za-z]:[\\/]/ : /^\/(?!\/)/;
   const dirs = new Set<string>();
   for (const proc of processes) {
-    if (/(?:^|[\\/])claude\.exe$/i.test(String(proc.executablePath || '').trim())) {
-      const match = String(proc.commandLine || '').match(/--user-data-dir=(?:"([^"]+)"|(\S+))/);
-      if (match) {
-        dirs.add(match[1] || match[2]);
+    if (desktopExe && proc.ppid === desktopPid && exe(proc) === desktopExe) {
+      const args = String(proc.commandLine || '').match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+      const flag = args.find((arg) => arg.startsWith('--user-data-dir='));
+      const dir = flag ? flag.slice('--user-data-dir='.length).replace(/"/g, '') : '';
+      if (args.some((arg) => arg.startsWith('--type=')) && localPath.test(dir)) {
+        dirs.add(dir);
       }
     }
   }
   return [...dirs];
 }
 
-function sessionRoots(processes: ProcessInfo[]): string[] {
+function sessionRoots(desktopPid: number, processes: ProcessInfo[]): string[] {
   const override = String(process.env.DISCORD_CODING_STATUS_CLAUDE_DESKTOP_SESSIONS || '').trim();
   if (override) {
     return [override];
   }
-  const running = runningDataDirs(processes);
+  const running = runningDataDirs(desktopPid, processes);
   if (running.length) {
     return running.map((dir) => path.join(dir, 'claude-code-sessions'));
   }
@@ -105,9 +114,10 @@ function parseSession(file: string): ClaudeDesktopSession | null {
   // A session gets its Claude Code id on its first run; until then the id is empty.
   const sessionId = typeof record.cliSessionId === 'string' ? record.cliSessionId.trim() : '';
   const model = typeof record.model === 'string' ? record.model.trim() : '';
+  const validModel = /^[A-Za-z0-9][A-Za-z0-9._:@\[\]-]{0,80}$/.test(model) && model !== 'default';
   const focusedAtMs = Number(record.lastFocusedAt) || 0;
   const usedAtMs = Math.max(focusedAtMs, Number(record.latestUserFrameAt) || 0);
-  return { sessionId, model: model && model !== 'default' ? model : null, focusedAtMs, usedAtMs };
+  return { sessionId, model: validModel ? model : null, focusedAtMs, usedAtMs };
 }
 
 function newestUsed(sessions: ClaudeDesktopSession[]): ClaudeDesktopSession {
@@ -148,11 +158,11 @@ function pickSession(sessions: ClaudeDesktopSession[], unreadableMtimeMs: number
  * id and no model when the records cannot name one. A session's own work does
  * not move these stamps, so a long run elsewhere cannot take the label.
  */
-export function readLastUsedClaudeDesktopSession(processes: ProcessInfo[] = []): ClaudeDesktopSession | null {
+export function readLastUsedClaudeDesktopSession(desktopPid = 0, processes: ProcessInfo[] = []): ClaudeDesktopSession | null {
   const next = new Map<string, CachedSession>();
   const sessions: ClaudeDesktopSession[] = [];
   let unreadableMtimeMs = 0;
-  for (const root of sessionRoots(processes)) {
+  for (const root of sessionRoots(desktopPid, processes)) {
     for (const file of sessionFiles(root)) {
       let mtimeMs: number;
       try {

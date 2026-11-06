@@ -504,7 +504,7 @@ export function readDesktopHostedClaudeModel(desktopPid: number, processes: Proc
     }
   }
 
-  const inUse = readLastUsedClaudeDesktopSession(processes);
+  const inUse = readLastUsedClaudeDesktopSession(desktopPid, processes);
   if (inUse) {
     const runner = runners.find((proc) => {
       const commandLine = String(proc.commandLine || '');
