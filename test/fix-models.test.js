@@ -16,6 +16,7 @@ process.env.DISCORD_CODING_STATUS_OPENCODE_STATE = path.join(root, 'opencode-sta
 process.env.DISCORD_CODING_STATUS_OPENCODE_MODELS_CACHE = path.join(root, 'opencode-cache', 'models.json');
 process.env.DISCORD_CODING_STATUS_CURSOR_STATE_DB = path.join(root, 'cursor', 'state.vscdb');
 process.env.CODEX_HOME = path.join(root, 'codex');
+process.env.DISCORD_CODING_STATUS_CLAUDE_DESKTOP_SESSIONS = path.join(root, 'claude-desktop-sessions');
 
 const { parseCodexCommandLineModel } = require('../dist/providers/codex/model');
 const { displayModelLabel, resetModelLabelCacheForTests } = require('../dist/providers/model-label');
@@ -24,6 +25,7 @@ const { readMuseTuiModelForProcess, museSessionCreatedAtMs } = require('../dist/
 const { readOpenCodeModel, parseOpenCodeRecentModel } = require('../dist/providers/opencode/model');
 const { readCursorModel, parseCursorApplicationUser } = require('../dist/providers/cursor/model');
 const { readDesktopHostedClaudeModel, claudeDesktopHostPid } = require('../dist/presence');
+const { readLastUsedClaudeDesktopSession } = require('../dist/providers/claude/desktop-sessions');
 
 test.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
@@ -218,6 +220,164 @@ test('Claude Desktop falls back to its Code-tab runners only when they agree', (
   // No runner under this Desktop: nothing to borrow.
   assert.equal(readDesktopHostedClaudeModel(desktopPid, [{ ...runner(1, '--model=claude-opus-5-5'), ppid: 1 }]), null);
   assert.equal(readDesktopHostedClaudeModel(desktopPid, [{ ...runner(1, ''), commandLine: `"${exe}" --type=renderer` }]), null);
+});
+
+test('Claude Desktop shows the session last used, whatever idle sessions run', (t) => {
+  const now = Date.now();
+  const desktopPid = 23200;
+  const exe = 'C:\\Claude\\app\\claude.exe';
+  const sessionsDir = path.join(process.env.DISCORD_CODING_STATUS_CLAUDE_DESKTOP_SESSIONS, 'account', 'organization');
+  const runner = (pid, args, createdAtMs = now - 60_000) => ({
+    pid, ppid: desktopPid, executablePath: exe, createdAtMs,
+    line: `${exe} ${args}`, commandLine: `"${exe}" --output-format stream-json --verbose ${args}`
+  });
+  const writeHooks = (sessions) => writeJson(process.env.DISCORD_CODING_STATUS_STATE_FILE, { version: 1, sessions });
+  const hook = (id, model, updatedAt = now - 5_000) => ({
+    tool: 'claude', surface: 'cli', status: 'running', session_id: id, cwd: root, updated_at: updatedAt, model, claude_entrypoint: 'claude-desktop'
+  });
+  // Each write gets a new mtime, as a real Desktop save does.
+  let tick = 0;
+  const record = (name, fields) => {
+    const file = path.join(sessionsDir, `local_${name}.json`);
+    writeJson(file, fields);
+    tick += 1;
+    fs.utimesSync(file, new Date(now + tick * 1000), new Date(now + tick * 1000));
+  };
+  const idleSonnet = runner(1, '--model=claude-sonnet-5-5');
+  const activeOpus = runner(2, '--model=claude-opus-5-5 --resume=active');
+
+  // Alone, the two runners disagree and nothing can be shown.
+  writeHooks({});
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet, activeOpus]), null);
+
+  record('idle', { cliSessionId: 'idle', model: 'claude-sonnet-5-5', latestUserFrameAt: now - 86_400_000 });
+  record('active', { cliSessionId: 'active', model: 'claude-opus-5-5', latestUserFrameAt: now - 5_000 });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet, activeOpus]), 'Opus 5.5');
+
+  // Opening a session without typing in it counts as using it.
+  record('idle', { cliSessionId: 'idle', model: 'claude-sonnet-5-5', lastFocusedAt: now - 1_000, latestUserFrameAt: now - 86_400_000 });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet, activeOpus]), 'Sonnet 5.5');
+  record('idle', { cliSessionId: 'idle', model: 'claude-sonnet-5-5', latestUserFrameAt: now - 86_400_000 });
+
+  // An archived session never names the model.
+  record('archived', { cliSessionId: 'archived', model: 'claude-haiku-5-5', latestUserFrameAt: now, isArchived: true });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet, activeOpus]), 'Opus 5.5');
+
+  // A /model switch reaches the session's hook; another session's hook never counts.
+  writeHooks({ a: hook('active', 'claude-haiku-5-5'), b: hook('idle', 'claude-fable-5-1', now) });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet, activeOpus]), 'Haiku 5.5');
+  // A hook older than the runner belongs to an earlier one, so the record stands.
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet, runner(2, '--model=claude-opus-5-5 --resume=active', now)]), 'Opus 5.5');
+
+  // A record with no model takes its runner's flag.
+  writeHooks({});
+  record('active', { cliSessionId: 'active', latestUserFrameAt: now - 4_000 });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet, activeOpus]), 'Opus 5.5');
+  // With no model anywhere for that session, an idle session never stands in.
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), null);
+
+  // A file caught mid-write may be the session in use, so an older one never stands in.
+  record('active', '{"cliSessionId":"act');
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), null);
+  // The failure is not remembered: the same mtime is read again.
+  const activeFile = path.join(sessionsDir, 'local_active.json');
+  const stamp = fs.statSync(activeFile).mtime;
+  writeJson(activeFile, { cliSessionId: 'active', model: 'claude-opus-5-5', latestUserFrameAt: now - 3_000 });
+  fs.utimesSync(activeFile, stamp, stamp);
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), 'Opus 5.5');
+  // A broken file older than the session in use changes nothing.
+  writeJson(path.join(sessionsDir, 'local_broken.json'), '{');
+  fs.utimesSync(path.join(sessionsDir, 'local_broken.json'), new Date(now - 60_000), new Date(now - 60_000));
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), 'Opus 5.5');
+  fs.rmSync(path.join(sessionsDir, 'local_broken.json'));
+  // A record that cannot even be stat'ed may be the session in use.
+  const realStat = fs.statSync;
+  t.mock.method(fs, 'statSync', (file, ...rest) => {
+    if (String(file).endsWith('local_active.json')) {
+      throw Object.assign(new Error('denied'), { code: 'EACCES' });
+    }
+    return realStat(file, ...rest);
+  });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), null);
+  fs.statSync.mock.restore();
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), 'Opus 5.5');
+
+  // A runner started with --session-id is bound as well: its older hook does not count.
+  writeHooks({ a: hook('active', 'claude-haiku-5-5') });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [runner(2, '--model=claude-opus-5-5 --session-id=active', now)]), 'Opus 5.5');
+  writeHooks({});
+
+  // Equal stamps on different models name nothing; on one model they do.
+  record('idle', { cliSessionId: 'idle', model: 'claude-sonnet-5-5', latestUserFrameAt: now - 3_000 });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), null);
+  record('idle', { cliSessionId: 'idle', model: 'claude-opus-5-5', latestUserFrameAt: now - 3_000 });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), 'Opus 5.5');
+  // Two records with no model cannot be said to agree, whatever their runners say.
+  record('active', { cliSessionId: 'active', latestUserFrameAt: now - 3_000 });
+  record('idle', { cliSessionId: 'idle', latestUserFrameAt: now - 3_000 });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet, activeOpus]), null);
+
+  // A message delivered to a session the user left: it may be a subagent's report.
+  record('active', { cliSessionId: 'active', model: 'claude-opus-5-5', lastFocusedAt: now - 60_000, latestUserFrameAt: now - 50_000 });
+  record('idle', { cliSessionId: 'idle', model: 'claude-sonnet-5-5', lastFocusedAt: now - 70_000, latestUserFrameAt: now - 2_000 });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), null);
+  // On the same model it makes no difference.
+  record('idle', { cliSessionId: 'idle', model: 'claude-opus-5-5', lastFocusedAt: now - 70_000, latestUserFrameAt: now - 2_000 });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), 'Opus 5.5');
+  // Two sessions from one view change may both be on screen: the newest message names one.
+  record('idle', { cliSessionId: 'idle', model: 'claude-sonnet-5-5', lastFocusedAt: now - 60_500, latestUserFrameAt: now - 2_000 });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), 'Sonnet 5.5');
+
+  // A session that has not run yet has no Claude Code id, and its record still counts.
+  record('new', { model: 'claude-fable-5-1', lastFocusedAt: now });
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), 'Fable 5.1');
+
+  // No Code-tab runner under this Desktop: a record alone names nothing.
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, []), null);
+
+  // With only an unreadable record, the runners do not decide either.
+  fs.rmSync(sessionsDir, { recursive: true, force: true });
+  writeJson(path.join(sessionsDir, 'local_only.json'), '{');
+  assert.equal(readDesktopHostedClaudeModel(desktopPid, [idleSonnet]), null);
+  fs.rmSync(process.env.DISCORD_CODING_STATUS_CLAUDE_DESKTOP_SESSIONS, { recursive: true, force: true });
+});
+
+test('Claude Desktop records are read from AppData and from the Store package', (t) => {
+  const saved = {
+    DISCORD_CODING_STATUS_CLAUDE_DESKTOP_SESSIONS: process.env.DISCORD_CODING_STATUS_CLAUDE_DESKTOP_SESSIONS,
+    APPDATA: process.env.APPDATA,
+    LOCALAPPDATA: process.env.LOCALAPPDATA
+  };
+  t.after(() => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  });
+  delete process.env.DISCORD_CODING_STATUS_CLAUDE_DESKTOP_SESSIONS;
+  process.env.APPDATA = path.join(root, 'roaming');
+  process.env.LOCALAPPDATA = path.join(root, 'local');
+  const folder = path.join('Claude', 'claude-code-sessions', 'account', 'organization');
+
+  assert.equal(readLastUsedClaudeDesktopSession(), null);
+  writeJson(path.join(process.env.APPDATA, folder, 'local_1.json'), { cliSessionId: 'appdata', latestUserFrameAt: 1_000 });
+  assert.equal(readLastUsedClaudeDesktopSession()?.sessionId, 'appdata');
+  writeJson(path.join(process.env.LOCALAPPDATA, 'Packages', 'Claude_test', 'LocalCache', 'Roaming', folder, 'local_2.json'), { cliSessionId: 'store', latestUserFrameAt: 2_000 });
+  assert.equal(readLastUsedClaudeDesktopSession()?.sessionId, 'store');
+
+  // A running Desktop names its own data folder, even with an older stamp there.
+  const dataDir = path.join(root, 'claude-data', 'claude_test');
+  writeJson(path.join(dataDir, 'claude-code-sessions', 'account', 'organization', 'local_3.json'), { cliSessionId: 'running', latestUserFrameAt: 500 });
+  const running = (exe, args) => [{ pid: 9, ppid: 1, executablePath: exe, commandLine: `"${exe}" ${args}`, line: `${exe} ${args}` }];
+  const desktopExe = 'C:\\Claude\\app\\Claude.exe';
+  assert.equal(readLastUsedClaudeDesktopSession(running(desktopExe, `--type=renderer --user-data-dir="${dataDir}" --lang=en`))?.sessionId, 'running');
+  assert.equal(readLastUsedClaudeDesktopSession(running(desktopExe, `--type=gpu-process --user-data-dir=${dataDir} --lang=en`))?.sessionId, 'running');
+  // Another Electron app's data folder is not Claude's, and a helper without the flag says nothing.
+  assert.equal(readLastUsedClaudeDesktopSession(running('C:\\Discord\\Discord.exe', `--user-data-dir=${dataDir}`))?.sessionId, 'store');
+  assert.equal(readLastUsedClaudeDesktopSession(running(desktopExe, '--type=utility'))?.sessionId, 'store');
 });
 
 test('an idle CLI under the focused window still counts as active and wins its provider', (t) => {

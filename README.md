@@ -53,7 +53,7 @@ only; it never guesses.
 | Tool | In Discord | Where the model comes from |
 | --- | --- | --- |
 | Claude Code (CLI) | <img src="./docs/screenshots/claude.png" width="300" alt="ClaudeCode, Model: Opus 5.5"> | Hook data, else the session transcript |
-| Claude Desktop app | same identity as Claude Code | The model button in the window; on the Code tab, the Claude Code sessions the app runs |
+| Claude Desktop app | same identity as Claude Code | The model button in the window; on the Code tab, the session you used last |
 | Codex Desktop app | <img src="./docs/screenshots/codex.png" width="300" alt="Codex, Model: GPT-6.1 Sol"> | Hook data, else the model you last picked in the composer |
 | Codex CLI | <img src="./docs/screenshots/codex-cli.png" width="300" alt="Codex, Model: GPT-6.2-Astra"> | Hook data, else the `--model` / `-m` flag, else `config.toml` (a `/model` switch counts) |
 | Antigravity | <img src="./docs/screenshots/antigravity.png" width="300" alt="Antigravity, Model: Gemini 4 Argon"> | The picker's selection, named through Antigravity's own model list |

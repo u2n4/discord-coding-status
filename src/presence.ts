@@ -44,6 +44,7 @@ import { parseCodexCommandLineModel, readCodexConfiguredModel, readCodexDesktopM
 import { readGrokProcessModel, readGrokSessionSummaryModel } from './providers/grok/model';
 import { readOpenCodeModel } from './providers/opencode/model';
 import { readCursorModel } from './providers/cursor/model';
+import { readLastUsedClaudeDesktopSession } from './providers/claude/desktop-sessions';
 import {
   readActiveAntigravityModel,
   readAntigravityCliModel,
@@ -471,12 +472,19 @@ export function claudeDesktopHostPid(proc: ProcessInfo, processes: ProcessInfo[]
  * Model of Claude Desktop's Code tab, shown when the window's own label cannot
  * be read. Every Code-tab session runs as a `claude --output-format
  * stream-json --model=<id> [--resume=<session>]` child of the Desktop
- * process. Each live runner's model is its bound hook session's model (the
- * session id it resumes, or the one unbound Code-tab hook session when exactly
- * one runner is unbound; /model switches arrive there), else its --model flag.
- * A value is returned only when every live runner agrees, so a background
- * tab with another model never labels the one on screen; a terminal Claude
- * Code session (entrypoint "cli") is never consulted.
+ * process, and those runners stay alive for days after their session goes
+ * idle. The session the user last opened or typed in, from Desktop's own
+ * records, names the model: its fresh hook (/model switches arrive there),
+ * else its record, else its runner's --model flag. When none of those know,
+ * or the records cannot name one session, no other session stands in. A new
+ * session's runner carries no session id, so a record cannot be required to
+ * have a live runner.
+ *
+ * Without such a record, each live runner's model is its bound hook session's
+ * model (the session id it resumes, or the one unbound Code-tab hook session
+ * when exactly one runner is unbound), else its --model flag, and a value is
+ * returned only when every live runner agrees. A terminal Claude Code session
+ * (entrypoint "cli") is never consulted.
  */
 export function readDesktopHostedClaudeModel(desktopPid: number, processes: ProcessInfo[]): string | null {
   const runners = processes.filter((proc) => proc.ppid === desktopPid
@@ -494,6 +502,20 @@ export function readDesktopHostedClaudeModel(desktopPid: number, processes: Proc
       && now - session.updated_at <= DESKTOP_HOSTED_MAX_AGE_MS) {
       sessions.set(session.session_id, session);
     }
+  }
+
+  const inUse = readLastUsedClaudeDesktopSession(processes);
+  if (inUse) {
+    const runner = runners.find((proc) => {
+      const commandLine = String(proc.commandLine || '');
+      return runnerFlag(commandLine, 'resume') === inUse.sessionId || runnerFlag(commandLine, 'session-id') === inUse.sessionId;
+    });
+    const hook = sessions.get(inUse.sessionId);
+    // A hook written before this runner started belongs to an earlier one.
+    const model = hook && (!runner?.createdAtMs || hook.updated_at >= runner.createdAtMs)
+      ? hook.model
+      : inUse.model || (runner ? runnerFlag(String(runner.commandLine || ''), 'model') : null);
+    return model ? truncatePresenceText(displayModelLabel('claude', model)) : null;
   }
 
   const bound = new Set<string>();
@@ -667,9 +689,9 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
   // that belongs to the same surface. Global guesses (Muse settings.json, the
   // Grok config default) are never shown: unknown stays app-only.
   if (tool.family === 'claude' && tool.providerId === 'claudeApp' && !model && tool.processInfo) {
-    // Desktop not in front (its window label is unread): its Code-tab runners
-    // still name the model when they agree. The detected Claude.exe may be a
-    // helper process, so the runners are looked up under its topmost Claude.exe.
+    // Desktop not in front (its window label is unread): its Code-tab sessions
+    // still name the model. The detected Claude.exe may be a helper process,
+    // so the runners are looked up under its topmost Claude.exe.
     const processes = getCachedProcessList();
     const hostPid = claudeDesktopHostPid(tool.processInfo, processes);
     const hosted = hostPid ? readDesktopHostedClaudeModel(hostPid, processes) : null;
