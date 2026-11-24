@@ -32,11 +32,13 @@
 // Binding and privacy contract: a model is returned ONLY for exactly one
 // Button candidate whose PID and HWND both equal the positively bound CURRENT
 // Claude foreground window/process/package (verified by the caller via the
-// process snapshot and GetForegroundWindow). Wrong PID, wrong HWND, Menu (or
-// any non-Button) control type, missing/empty first child, zero matches, or
-// several matches all fail closed to null (application name only). Only the
-// model button Name prefix and its FIRST text child are ever read; no
-// conversation, project, or general UI text is captured, copied, or logged.
+// process snapshot and GetForegroundWindow). Split view shows one button per
+// pane, and the one in the pane holding keyboard focus is the candidate marked
+// focusedPane. Wrong PID, wrong HWND, Menu (or any non-Button) control type,
+// missing/empty first child, zero matches, or several matches with no single
+// focused pane all fail closed to null (application name only). Only the model
+// button Name prefix and its FIRST text child are ever read; no conversation,
+// project, or general UI text is captured, copied, or logged.
 
 export const CLAUDE_DESKTOP_MODEL_BUTTON_PREFIX = 'Model:';
 export const CLAUDE_DESKTOP_CONTROL_TYPE_BUTTON = 'Button';
@@ -49,6 +51,7 @@ export interface ClaudeDesktopUiCandidate {
   controlType: string;
   name: string;
   modelChildLabel: string | null;
+  focusedPane?: boolean;
 }
 
 export interface ClaudeDesktopModelBinding {
@@ -107,6 +110,7 @@ export function selectClaudeDesktopModel(
   }
 
   const matches: string[] = [];
+  const focused: string[] = [];
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== 'object') {
       continue;
@@ -126,7 +130,13 @@ export function selectClaudeDesktopModel(
     }
 
     matches.push(model);
+    if (candidate.focusedPane === true) {
+      focused.push(model);
+    }
   }
 
-  return matches.length === 1 ? matches[0] : null;
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  return focused.length === 1 ? focused[0] : null;
 }

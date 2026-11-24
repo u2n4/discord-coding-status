@@ -267,40 +267,40 @@ test('only the most recently updated session is submitted; older tools are clear
   };
 
   writeState({
-    'codex-old': {
-      tool: 'codex',
+    'pi-old': {
+      tool: 'pi',
       surface: 'cli',
       status: 'running',
-      session_id: 'codex-old',
+      session_id: 'pi-old',
       cwd: process.cwd(),
       updated_at: older,
       started_at: older,
-      activity: 'Older codex session',
-      model: 'codex-model-old'
+      activity: 'Older pi session',
+      model: 'pi-model-old'
     }
   });
 
-  const codexActivity = await waitFor(
+  const piActivity = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.clientId === '1517375602662051900'
-        && event.activity.details === 'Model: codex-model-old'
+        && event.clientId === '1538957711503396986'
+        && event.activity.details === 'Model: pi-model-old'
     ),
-    'the first codex session to reach Discord RPC'
+    'the first pi session to reach Discord RPC'
   );
-  assert.ok(codexActivity);
+  assert.ok(piActivity);
 
   writeState({
-    'codex-old': {
-      tool: 'codex',
+    'pi-old': {
+      tool: 'pi',
       surface: 'cli',
       status: 'running',
-      session_id: 'codex-old',
+      session_id: 'pi-old',
       cwd: process.cwd(),
       updated_at: older,
       started_at: older,
-      activity: 'Older codex session',
-      model: 'codex-model-old'
+      activity: 'Older pi session',
+      model: 'pi-model-old'
     },
     'opencode-new': {
       tool: 'opencode',
@@ -325,14 +325,14 @@ test('only the most recently updated session is submitted; older tools are clear
   );
   assert.ok(opencodeActivity);
 
-  const codexClear = await waitFor(
+  const piClear = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'clearActivity'
-        && event.clientId === '1517375602662051900'
+        && event.clientId === '1538957711503396986'
     ),
-    'the older codex session to clear Discord RPC'
+    'the older pi session to clear Discord RPC'
   );
-  assert.ok(codexClear);
+  assert.ok(piClear);
   assert.equal(daemon.output().stderr, '');
 });
 

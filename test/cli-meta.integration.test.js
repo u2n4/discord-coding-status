@@ -19,6 +19,7 @@ test('an empty CLI invocation prints project information and usage without start
   assert.match(result.stdout, /Repository: https:\/\/github\.com\/u2n4\/discord-coding-status/);
   assert.match(result.stdout, /npx @u2n4\/discord-coding-status@latest setup/);
   assert.match(result.stdout, /Antigravity: \d+/);
+  assert.match(result.stdout, /T3 Code:/);
   assert.doesNotMatch(result.stdout, /Starting Discord Coding Status daemon/);
   assert.equal(result.stderr, '');
 });

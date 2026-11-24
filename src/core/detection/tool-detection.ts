@@ -91,6 +91,31 @@ export function isClaudeDesktopProcess(value: ProcessDescriptor | string): boole
     || (isKnownWindowsInstall && isClaudeExecutable);
 }
 
+const JS_WRAPPER_EXECUTABLES = /^(?:node|bun|bunx|npx|npm|pnpm|yarn)(?:\.(?:exe|cmd|bat))?$/;
+
+function matchesJsRuntimeWrapper(
+  value: ProcessDescriptor | string,
+  executable: string,
+  packageRegex: RegExp
+): boolean {
+  if (!JS_WRAPPER_EXECUTABLES.test(executable)) {
+    return false;
+  }
+
+  const commandText = typeof value !== 'string' && value.commandLine
+    ? value.commandLine.trim().toLowerCase().replace(/\\/g, '/').replace(/\s+/g, ' ')
+    : normalizedProcessText(value).replace(/\\/g, '/');
+
+  // Inline evaluation (`node -e`, `bun --eval`, etc.) executes snippet code
+  // such as MCP server loaders that often mention `~/.codex/...`, never an
+  // interactive agent CLI entrypoint.
+  if (/(?:^|\s)(?:-e|--eval)(?:\s|=|"|'|$)/.test(commandText)) {
+    return false;
+  }
+
+  return packageRegex.test(commandText);
+}
+
 export function isClaudeCodeProcess(value: ProcessDescriptor | string): boolean {
   if (isClaudeDesktopProcess(value) || isClaudeCodeUrlHandlerProcess(value)) {
     return false;
@@ -103,7 +128,11 @@ export function isClaudeCodeProcess(value: ProcessDescriptor | string): boolean 
     || executable === 'claude-code'
     || executable === 'claude-code.exe'
     || /(?:^|[\s/])claude-code(?:\.exe)?(?:\s|$)/.test(text)
-    || /(?:^|[\s/])(?:bun|bunx|node|npx|npm|pnpm|yarn)\s+.*(?:@anthropic-ai\/)?claude-code(?:[/.][^\s]*)?(?:\s|$)/.test(text);
+    || matchesJsRuntimeWrapper(
+      value,
+      executable,
+      /(?:^|[\s/"'])(?:@[\w.-]+\/)?claude-code(?:\/[^\s"']*)?(?:["'\s]|$)/
+    );
 }
 
 export function isCodexDesktopProcess(value: ProcessDescriptor | string): boolean {
@@ -148,19 +177,21 @@ export function isCodexCliProcess(value: ProcessDescriptor | string): boolean {
   const text = normalizedProcessText(value).replace(/\\/g, '/');
   const executable = executableBasename(value);
 
-  if (executable === 'codex' || executable === 'codex.exe') {
-    // The standalone Codex desktop app starts `codex app-server` headless at
-    // login, plus a `codex exec-server` cloud service. Those background
-    // services are not interactive CLI sessions and must not light up as
-    // active presence while the user is doing nothing.
-    if (/(?:^|[\s/])(?:app|exec)[-_]server(?:\s|$)/.test(text)) {
-      return false;
-    }
+  // Exclude headless `codex app-server` / `codex exec-server` regardless of
+  // whether launched natively or via a `node .../codex.js app-server` wrapper.
+  if (/(?:^|\s)(?:app|exec)[-_]server(?:\s|$)/.test(text)) {
+    return false;
+  }
 
+  if (executable === 'codex' || executable === 'codex.exe') {
     return true;
   }
 
-  return /(?:^|[\s/])(?:bun|bunx|node|npx|npm|pnpm|yarn)\s+.*(?:@[\w.-]+\/)?codex(?:[/.][^\s]*)?(?:\s|$)/.test(text);
+  return matchesJsRuntimeWrapper(
+    value,
+    executable,
+    /(?:^|[\s/"'])(?:@[\w.-]+\/)?codex(?:\/[^\s"']*)?(?:["'\s]|$)/
+  );
 }
 
 export function isOpencodeProcess(value: ProcessDescriptor | string): boolean {
@@ -176,23 +207,57 @@ export function isOpencodeProcess(value: ProcessDescriptor | string): boolean {
 
   return executable === 'opencode'
     || executable === 'opencode.exe'
-    || /(?:^|[\s/])(?:bun|bunx|node|npx|npm|pnpm|yarn)\s+.*(?:@[\w.-]+\/)?opencode(?:[/.][^\s]*)?(?:\s|$)/.test(text);
+    || matchesJsRuntimeWrapper(
+      value,
+      executable,
+      /(?:^|[\s/"'])(?:@[\w.-]+\/)?opencode(?:\/[^\s"']*)?(?:["'\s]|$)/
+    );
 }
 
 export function isPiProcess(value: ProcessDescriptor | string): boolean {
-  const text = normalizedProcessText(value).replace(/\\/g, '/');
   const executable = executableBasename(value);
   return executable === 'pi'
     || executable === 'pi.exe'
-    || /(?:^|[\s/])(?:bun|bunx|node|npx|npm|pnpm|yarn)\s+.*pi-coding-agent(?:[/.][^\s]*)?(?:\s|$)/.test(text);
+    || matchesJsRuntimeWrapper(
+      value,
+      executable,
+      /(?:^|[\s/"'])(?:@[\w.-]+\/)?pi-coding-agent(?:\/[^\s"']*)?(?:["'\s]|$)/
+    );
 }
 
 export function isGrokProcess(value: ProcessDescriptor | string): boolean {
-  const text = normalizedProcessText(value).replace(/\\/g, '/');
   const executable = executableBasename(value);
   return executable === 'grok'
     || executable === 'grok.exe'
-    || /(?:^|[\s/])(?:bun|bunx|node|npx|npm|pnpm|yarn)\s+.*(?:@[\w.-]+\/)?grok(?:[/.][^\s]*)?(?:\s|$)/.test(text);
+    || matchesJsRuntimeWrapper(
+      value,
+      executable,
+      /(?:^|[\s/"'])(?:@[\w.-]+\/)?grok(?:\/[^\s"']*)?(?:["'\s]|$)/
+    );
+}
+
+const T3_CODE_EXECUTABLE_REGEX = /^(?:t3 code(?: \([a-z0-9._ -]+\))?\.exe|t3code(?:\.exe)?|t3-code)$/;
+const T3_CODE_MAC_BUNDLE_REGEX = /\/(?:t3 code(?: \([a-z0-9._ -]+\))?|t3code)\.app\/contents\//;
+
+// The desktop app, including channel builds (`T3 Code (Beta).exe`,
+// `T3 Code (Nightly).exe`, etc.). Uninstallers, the resource monitor, and a
+// folder that merely contains "t3code" are not the app.
+export function isT3CodeProcess(value: ProcessDescriptor | string): boolean {
+  const executable = executableBasename(value);
+  if (T3_CODE_EXECUTABLE_REGEX.test(executable)) {
+    return true;
+  }
+  const text = normalizedProcessText(value).replace(/\\/g, '/');
+  return T3_CODE_MAC_BUNDLE_REGEX.test(text);
+}
+
+export function isT3NightlyProcess(value: ProcessDescriptor | string): boolean {
+  const executable = executableBasename(value);
+  if (executable === 't3 code (nightly).exe') {
+    return true;
+  }
+  const text = normalizedProcessText(value).replace(/\\/g, '/');
+  return text.includes('/t3 code (nightly).app/contents/');
 }
 
 export function isCursorProcess(value: ProcessDescriptor | string): boolean {
@@ -257,7 +322,16 @@ export function isAntigravityProcess(value: ProcessDescriptor | string): boolean
 }
 
 // Antigravity CLI (`agy`), a separate binary from the Antigravity desktop app.
+// `agy acp` is a headless ACP protocol server (for example spawned by T3 Code),
+// not an interactive terminal CLI, so it must not light up as Antigravity.
 export function isAntigravityCliProcess(value: ProcessDescriptor | string): boolean {
   const executable = executableBasename(value);
-  return executable === 'agy' || executable === 'agy.exe';
+  if (executable !== 'agy' && executable !== 'agy.exe') {
+    return false;
+  }
+  const text = normalizedProcessText(value).replace(/\\/g, '/');
+  if (/(?:^|[\s/"'])agy(?:\.exe)?["']?\s+acp(?:\s|$)/.test(text)) {
+    return false;
+  }
+  return true;
 }

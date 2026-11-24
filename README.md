@@ -24,7 +24,8 @@ Model: GPT-6.1 Sol
 ```
 
 That is all Discord ever sees: the tool's name and one model line, written the way the tool itself
-writes it. No prompts, files, project names, branches, quotas or timers.
+writes it. No prompts, files, project names, branches, quotas or timers. T3 Code adds one extra
+line, `5 agents`, only while 5 or more agents are working. Fewer than that, and the line stays off.
 
 It is not a Discord bot. It talks to the Discord Desktop app on your own computer, so there is no
 token, server or account to set up.
@@ -63,6 +64,7 @@ only; it never guesses.
 | Muse Code | <img src="./docs/screenshots/muse.png" width="300" alt="Muse Code, Model: Muse Spark 1.3"> | Hook data, else the session the running TUI opened |
 | OpenCode | <img src="./docs/screenshots/opencode.png" width="300" alt="Open Code, Model: Hy4 preview"> | Your latest pick in `~/.local/state/opencode/model.json` |
 | Pi | tool name only | — |
+| T3 Code | tool name, model, and `N agents` when 5 or more agents are working | The thread open in T3, named from T3's own model list. Needs your own Discord application id (`t3ClientId`); none is built in |
 
 The screenshots are real Discord captures (Windows 11, November 2026).
 
@@ -71,7 +73,7 @@ The screenshots are real Discord captures (Windows 11, November 2026).
 | Need | Notes |
 | --- | --- |
 | Discord **Desktop** app, signed in | The browser version of Discord cannot receive activity. |
-| Node.js 20 or newer | Install the **LTS** version from <https://nodejs.org>; it includes `npx`. Node.js 22.13+ is recommended: Cursor's model, and the Antigravity fallback, are read with Node's built-in SQLite. |
+| Node.js 20 or newer | Install the **LTS** version from <https://nodejs.org>; it includes `npx`. Node.js 22.13+ is recommended: Cursor's model, the Antigravity fallback, and T3 Code are read with Node's built-in SQLite. |
 | Windows 10/11 | Tested here: every tool above, start-at-login, window-focus switching. |
 | macOS | Start-at-login and hooks come from the original project and are not re-tested. Antigravity's model list and Claude Desktop's model button are read on Windows only. |
 | Linux | Not supported by `setup`, `uninstall` or start-at-login, and untested. |
@@ -144,8 +146,8 @@ hooks are installed for each tool.
 Most people need none. The file is `~/discord-coding-status/config.json` and starts as `{}`.
 
 Each tool appears in Discord through a Discord application (that is where the name and icon come
-from). Built-in applications are included for every tool; to use your own, create one at
-<https://discord.com/developers/applications> and put its Application ID here:
+from). Built-in applications are included for every tool except T3 Code. To use your own, or to
+show T3 Code, create one at <https://discord.com/developers/applications> and put its Application ID here:
 
 ```json
 {
@@ -156,6 +158,8 @@ from). Built-in applications are included for every tool; to use your own, creat
 | Key | Default | Effect |
 | --- | --- | --- |
 | `codexClientId`, `claudeClientId`, `antigravityClientId`, `cursorClientId`, `grokClientId`, `museClientId`, `opencodeClientId`, `piClientId` | built in | The Discord application shown for that tool. |
+| `t3ClientId` | none | Discord application for T3 Code. Until this is set, T3 Code is detected but not shown. Create an application named T3 Code at <https://discord.com/developers/applications>, upload the T3 icon, and put the application id here. |
+| `t3ImageKey` | T3's public 512px icon URL | Replaces the large image. Leave it unset to use the built-in URL. |
 | `stateFile` | `~/discord-coding-status/states.json` | Where hook sessions are stored. |
 
 Or run `npx @u2n4/discord-coding-status config`: it asks for each value, showing the built-in one. Enter keeps a
@@ -172,6 +176,7 @@ keeps your settings.
 | `npx` is not recognized | Install Node.js LTS from <https://nodejs.org>, then close and reopen the terminal. |
 | Nothing on Discord | Use the Discord Desktop app, not the browser, and turn on activity sharing in User Settings → Activity Privacy. |
 | The card shows the tool but no model | The model could not be proven yet. Send one prompt in that tool, or pick a model in its picker. |
+| T3 Code never appears | Create a Discord application, set `t3ClientId`, then run `setup` again. There is no built-in T3 application id. |
 | Codex updates are late | Run `/hooks` in Codex and trust the Discord Coding Status hooks. |
 | A tool never appears | Without hooks, a tool counts only while it is busy or its window is in front; send it a prompt. If you installed the tool after this program, run `npx @u2n4/discord-coding-status setup` again to add its hooks. |
 | Anything else | Read the logs (below), then open an issue with the last lines. |
@@ -227,7 +232,11 @@ keep their previous file as a `.bak` copy; Grok Code's hooks live in a file of t
 ## Privacy
 
 - Discord receives the tool's name and the model line, through Discord Desktop on your own computer.
+  For T3 Code it can also receive `N agents` when 5 or more agents are working, and T3's public icon URL.
 - Prompts, replies, files, folder names, branches, accounts and quotas are never sent to Discord.
+- T3 Code's model and agent count are read locally from `~/.t3/userdata/statev2.sqlite` and the model
+  names in `~/.t3/caches`. Message text is not read. The program does not download the icon; Discord
+  may fetch that public URL itself when the card is shown.
 - Hook data stays in a local file on your computer. Prompt and reply text is never stored.
 - To name Antigravity's models, the program asks Antigravity's own language server on `127.0.0.1`.
   The background program makes no other network requests.

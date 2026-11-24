@@ -8,6 +8,7 @@ import {
   processTreePids
 } from './core/detection/active-tools';
 import {
+  ForegroundPidSettler,
   rememberLastFocusedFamily
 } from './core/selection/last-focused';
 import {
@@ -42,6 +43,18 @@ import {
   unwatchSelectedModelFile,
   watchSelectedModelFile
 } from './adapters/system/selected-model-watch';
+import {
+  getT3LocalStorageDirectory,
+  getT3StateDatabase,
+  getT3WatchStamp,
+  invalidateT3DraftLogCache
+} from './providers/t3/model';
+
+const T3_DRAFT_WATCH_DEBOUNCE_MS = 30;
+// Windows NTFS does not emit fs.watch events for non-fsynced appends to open
+// SQLite WAL / Chromium LevelDB log handles. A stat-only check (3 statSync
+// calls, ~0.04ms) catches picker/model writes immediately while T3 is selected.
+const T3_STAT_POLL_MS = 250;
 import {
   HELPER_RESTART_CAP_MS,
   HelperRestartBackoff,
@@ -103,7 +116,7 @@ import {
   clientIdForTool,
   destroyRpcClient,
   detectStateTools,
-  enrichToolsForPresence,
+  enrichToolForPresence,
   labelForClientId,
   markShuttingDown,
   mergeActiveTools,
@@ -160,8 +173,10 @@ let censusMode: 'active' | 'idle' | null = null;
 let foregroundWatcherStarted = false;
 let watcherRestartTimer: ReturnType<typeof setTimeout> | null = null;
 const foregroundWatcherBackoff = new HelperRestartBackoff();
-let latestForegroundPid: number | null | undefined = undefined;
-let lastForegroundPid: number | null | undefined = undefined;
+const foregroundSettler = new ForegroundPidSettler((pid: number | null) => {
+  debugLog(`Foreground PID changed to ${pid === null ? 'unknown' : pid}.`);
+  requestFastUpdate('foreground');
+});
 let claudeDesktopWatcherStarted = false;
 let claudeDesktopExpectedPid: number | null = null;
 let claudeDesktopWatcherRestartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -190,9 +205,12 @@ function validateEnvironment(): void {
 
   for (const [name, value] of ids) {
     if (!value) {
+      // Cursor, Muse and T3 may have no id yet. T3 has no built-in application,
+      // so an empty id must not stop the daemon; that tool is simply not shown.
       if (name === 'DISCORD_CLIENT_ID'
         || name.endsWith('CURSOR_CLIENT_ID')
-        || name.endsWith('MUSE_CLIENT_ID')) {
+        || name.endsWith('MUSE_CLIENT_ID')
+        || name.endsWith('T3_CLIENT_ID')) {
         continue;
       }
 
@@ -604,12 +622,81 @@ function noteAiActivity(alive: boolean): void {
   }
 }
 
+// T3's composer writes a model pick to its localStorage LevelDB log at once,
+// long before the database hears of it. Watched only while T3 is selected.
+let t3DraftWatcher: import('node:fs').FSWatcher | null = null;
+let t3DraftWatchTimer: ReturnType<typeof setTimeout> | null = null;
+let t3StatPollTimer: ReturnType<typeof setInterval> | null = null;
+let lastT3WatchStamp = '';
+
+function setT3DraftWatch(enabled: boolean): void {
+  if (!enabled || shuttingDown) {
+    if (t3DraftWatchTimer) {
+      clearTimeout(t3DraftWatchTimer);
+      t3DraftWatchTimer = null;
+    }
+    if (t3StatPollTimer) {
+      clearInterval(t3StatPollTimer);
+      t3StatPollTimer = null;
+    }
+    lastT3WatchStamp = '';
+    t3DraftWatcher?.close();
+    t3DraftWatcher = null;
+    return;
+  }
+  if (!t3StatPollTimer) {
+    lastT3WatchStamp = getT3WatchStamp();
+    t3StatPollTimer = setInterval(() => {
+      if (shuttingDown) {
+        return;
+      }
+      const stamp = getT3WatchStamp();
+      if (stamp !== lastT3WatchStamp) {
+        lastT3WatchStamp = stamp;
+        requestFastUpdate('t3-stat');
+      }
+    }, T3_STAT_POLL_MS);
+    (t3StatPollTimer as unknown as { unref?: () => void }).unref?.();
+  }
+  if (t3DraftWatcher) {
+    return;
+  }
+  const directory = getT3LocalStorageDirectory();
+  try {
+    const watcher = fs.watch(directory, (_eventType: string, filename: string | Buffer | null) => {
+      if (shuttingDown || (filename && !filename.toString().endsWith('.log'))) {
+        return;
+      }
+      invalidateT3DraftLogCache();
+      if (t3DraftWatchTimer) {
+        clearTimeout(t3DraftWatchTimer);
+      }
+      t3DraftWatchTimer = setTimeout(() => {
+        t3DraftWatchTimer = null;
+        lastT3WatchStamp = getT3WatchStamp();
+        requestFastUpdate('t3-draft');
+      }, T3_DRAFT_WATCH_DEBOUNCE_MS);
+    });
+    watcher.on('error', () => {
+      t3DraftWatcher?.close();
+      t3DraftWatcher = null;
+    });
+    t3DraftWatcher = watcher;
+    debugLog(`Watching T3 composer drafts in ${directory}.`);
+    // A pick written between the last read and this registration fired no event.
+    requestFastUpdate('t3-draft-watch');
+  } catch (_) {
+    // No T3 renderer data here: the stat watcher still tracks the database.
+    t3DraftWatcher = null;
+  }
+}
+
 function getWatcherForegroundPid(): number | null | undefined {
   if (!isForegroundWatcherHealthy()) {
     return undefined;
   }
 
-  return latestForegroundPid;
+  return foregroundSettler.current();
 }
 
 function updateSelectedModelWatch(
@@ -621,6 +708,7 @@ function updateSelectedModelWatch(
     const displayable = activeTools.filter((tool) => clientIdForTool(tool));
     const selected = selectNewestTool(displayable, effectivePreferred, effectiveSurface);
     let file: string | null = null;
+    setT3DraftWatch(selected?.family === 't3');
 
     if (selected) {
       if (selected.family === 'muse') {
@@ -647,6 +735,10 @@ function updateSelectedModelWatch(
         if (!file) {
           file = readGrokDefaultConfigModel()?.filePath || null;
         }
+      } else if (selected.family === 't3') {
+        const database = getT3StateDatabase();
+        const wal = `${database}-wal`;
+        file = fs.existsSync(wal) ? wal : database;
       } else if (selected.family === 'antigravity') {
         const stateFile = getAntigravityStateFile();
         file = (fs.existsSync(stateFile) ? stateFile : null)
@@ -691,7 +783,7 @@ function claudeDesktopProviderMatchesPid(pid: number): boolean {
   }
 }
 
-const DESKTOP_LABEL_GRACE_MS = 2_000;
+const DESKTOP_LABEL_GRACE_MS = 3_500;
 let desktopLabelPending: { pid: number; since: number } | null = null;
 
 function getVerifiedDesktopModelForDisplay(): VerifiedClaudeDesktopModel | null {
@@ -1055,7 +1147,23 @@ async function runFastPass(generation: number): Promise<void> {
     ensureClaudeDesktopModelTracker(null);
   }
 
-  const activeTools = await enrichToolsForPresence(museResolvedTools);
+  // The remembered family keeps app priority once its window loses focus.
+  const effectiveSurface = currentForegroundFamily && currentForegroundFamily === effectivePreferred
+    ? currentForegroundSurface
+    : null;
+
+  // Enrich only the one tool that will actually be displayed (instead of
+  // reading disk/SQLite state for every background tool on every fast pass).
+  const displayableResolved = museResolvedTools.filter((tool) => clientIdForTool(tool));
+  const selectionCandidates = desktopOverride
+    ? applyClaudeDesktopDisplayOverride(displayableResolved, desktopOverride)
+    : displayableResolved;
+  const picked = selectNewestTool(selectionCandidates, effectivePreferred, effectiveSurface);
+  const pickedOriginal = picked
+    ? displayableResolved.find((tool) => tool.key === picked.key) || picked
+    : null;
+  const enrichedSelected = pickedOriginal ? await enrichToolForPresence(pickedOriginal) : null;
+  const activeTools = enrichedSelected ? [enrichedSelected] : [];
 
   if (fastQueued && !shuttingDown && consecutiveFastAborts < MAX_CONSECUTIVE_FAST_ABORTS) {
     consecutiveFastAborts += 1;
@@ -1074,10 +1182,6 @@ async function runFastPass(generation: number): Promise<void> {
 
   const withDesktop = desktopOverride ? applyClaudeDesktopDisplayOverride(activeTools, desktopOverride) : activeTools;
 
-  // The remembered family keeps app priority once its window loses focus.
-  const effectiveSurface = currentForegroundFamily && currentForegroundFamily === effectivePreferred
-    ? currentForegroundSurface
-    : null;
   await updateActivities(withDesktop, effectivePreferred, effectiveSurface);
   updateSelectedModelWatch(withDesktop, effectivePreferred, effectiveSurface);
 }
@@ -1154,23 +1258,15 @@ function startForegroundWatcherIfNeeded(): void {
   }
 
   foregroundWatcherStarted = true;
-  latestForegroundPid = undefined;
-  lastForegroundPid = undefined;
+  foregroundSettler.reset();
 
   const handle = startForegroundWatcher(
     (pid: number | null) => {
-      if (pid === lastForegroundPid) {
-        return;
-      }
-
-      lastForegroundPid = pid;
-      latestForegroundPid = pid;
-      debugLog(`Foreground PID changed to ${pid === null ? 'unknown' : pid}.`);
-      requestFastUpdate('foreground');
+      foregroundSettler.observe(pid);
     },
     () => {
       debugLog('Foreground watcher exited; using oneshot fallback until restart.');
-      latestForegroundPid = undefined;
+      foregroundSettler.reset();
       scheduleWatcherRestart();
     }
   );
@@ -1198,8 +1294,7 @@ function stopForegroundWatcherIfNeeded(): void {
   }
 
   foregroundWatcherStarted = false;
-  latestForegroundPid = undefined;
-  lastForegroundPid = undefined;
+  foregroundSettler.reset();
 }
 
 function stopStateWatcher(): void {
@@ -1284,6 +1379,7 @@ async function shutdown(signal: string): Promise<void> {
     pollTimer = null;
   }
   stopStateWatcher();
+  setT3DraftWatch(false);
   stopForegroundWatcherIfNeeded();
   stopClaudeDesktopModelTracker();
   stopCensusHelper();

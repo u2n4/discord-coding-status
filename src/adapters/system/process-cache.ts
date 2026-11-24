@@ -24,13 +24,13 @@ const MAX_REFRESH_PROCESSES = 32;
 const MAX_DEDUP_ENTRIES = 128;
 
 const HOST_OR_AI_PROCESS_REGEX =
-  /(?:windowsterminal|openconsole|conhost|pwsh|powershell|cmd\.exe|wt\.exe|wezterm|alacritty|mintty|cursor|code\.exe|claude|codex|chatgpt|grok|antigravity|muse|opencode|pi\.exe|node\.exe|bun\.exe)/i;
+  /(?:windowsterminal|openconsole|conhost|pwsh|powershell|cmd\.exe|wt\.exe|wezterm|alacritty|mintty|cursor|code\.exe|claude|codex|chatgpt|grok|antigravity|muse|opencode|pi\.exe|node\.exe|bun\.exe|(?:^|[\\/"])t3 code(?: \([a-z0-9._ -]+\))?\.exe|t3code\.exe)/i;
 
 // Executable basenames the slow Windows census always enumerates (mirrors the
 // Win32_Process filter in processes.ts). A retained process with one of these
 // names that is missing from a fresh census is dead (or its PID was reused).
 const CENSUS_EXECUTABLE_REGEX =
-  /^(?:(?:node|bun|claude|codex|chatgpt|grok|antigravity|cursor|opencode|pi|pwsh|powershell|cmd|windowsterminal|conhost|openconsole)\.exe|muse.*)$/i;
+  /^(?:(?:node|bun|claude|codex|chatgpt|grok|antigravity|cursor|opencode|pi|pwsh|powershell|cmd|windowsterminal|conhost|openconsole)\.exe|muse.*|t3 code(?: \([a-z0-9._ -]+\))?\.exe|t3code\.exe)$/i;
 
 function executableBasename(proc: ProcessInfo): string {
   // Only the CIM ExecutablePath is trusted; without it the process is never

@@ -32,6 +32,9 @@ test('the config editor offers only settings that change something', () => {
   }
   assert.equal(byKey.get('DISCORD_CODING_STATUS_CODEX_CLIENT_ID').defaultValue, DEFAULT_CODEX_CLIENT_ID);
   assert.equal(byKey.get('DISCORD_CODING_STATUS_ANTIGRAVITY_CLIENT_ID').defaultValue, DEFAULT_ANTIGRAVITY_CLIENT_ID);
+  const t3 = byKey.get('DISCORD_CODING_STATUS_T3_CLIENT_ID');
+  assert.ok(t3, 'T3 application ID is editable');
+  assert.equal(t3.defaultValue, '');
   assert.ok(byKey.has('DISCORD_CODING_STATUS_STATE_FILE'));
 
   for (const inert of [
@@ -102,7 +105,9 @@ test('config keeps a custom Discord application ID for every tool', async (t) =>
     grokClientId: '100000000000000005',
     cursorClientId: '100000000000000006',
     museClientId: '100000000000000007',
-    antigravityClientId: '100000000000000008'
+    antigravityClientId: '100000000000000008',
+    t3ClientId: '100000000000000009',
+    t3ImageKey: 't3-mark'
   };
   const configDirectory = path.join(directory, 'discord-coding-status');
   fs.mkdirSync(configDirectory, { recursive: true });

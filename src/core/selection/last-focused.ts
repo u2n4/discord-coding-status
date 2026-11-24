@@ -65,3 +65,65 @@ export function clearLastFocusedFamily(): void {
 export function resetLastFocusedFamilyForTests(): void {
   lastFocusedFamily = null;
 }
+
+export const FOREGROUND_SETTLE_MS = 250;
+
+/**
+ * Debounces transient Windows focus bounces (e.g. Alt-Tab pass-throughs or
+ * popup flashes lasting < settleMs) so Discord presence does not flicker
+ * clear/set between apps. The first foreground observation settles at once.
+ */
+export class ForegroundPidSettler {
+  private settledPid: number | null | undefined = undefined;
+  private rawPid: number | null | undefined = undefined;
+  private timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(
+    private readonly onSettled: (pid: number | null) => void,
+    private readonly settleMs: number = FOREGROUND_SETTLE_MS
+  ) {}
+
+  current(): number | null | undefined {
+    return this.settledPid;
+  }
+
+  observe(pid: number | null): void {
+    if (pid === this.rawPid && this.settledPid !== undefined) {
+      return;
+    }
+    this.rawPid = pid;
+
+    if (this.settledPid === undefined) {
+      this.settledPid = pid;
+      this.onSettled(pid);
+      return;
+    }
+
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+
+    if (pid === this.settledPid) {
+      return;
+    }
+
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (this.rawPid !== this.settledPid) {
+        this.settledPid = this.rawPid as number | null;
+        this.onSettled(this.settledPid);
+      }
+    }, this.settleMs);
+    (this.timer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  reset(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.settledPid = undefined;
+    this.rawPid = undefined;
+  }
+}

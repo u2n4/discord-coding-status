@@ -23,7 +23,7 @@ const LS_START_MARK = 'Starting language server process with pid ';
 const LS_START_BLOCK_BYTES = 256 * 1024;
 const LS_REQUEST_TIMEOUT_MS = 2_500;
 const LS_RESPONSE_MAX_BYTES = 1024 * 1024;
-const LS_LOOKUP_TIMEOUT_MS = 5_000;
+const LS_LOOKUP_TIMEOUT_MS = 8_000;
 const REFRESH_KNOWN_MS = 30 * 60_000;
 const RETRY_UNKNOWN_MS = 30_000;
 const RENAME_RETRY_DELAYS_MS = [25, 75, 200];
@@ -296,17 +296,27 @@ export function parseLanguageServerLookup(lookup: unknown, endpoint: LanguageSer
   return token?.[1] || null;
 }
 
+// Antigravity's Go language server listener on 127.0.0.1 often surfaces in
+// Get-NetTCPConnection with RemotePort=0 and an unmapped State (0 / blank)
+// instead of Listen, so filtering by RemotePort=0 and passive states preserves
+// pid/port-ownership verification without missing active listeners.
+export function buildLanguageServerLookupScript(endpoint: LanguageServerEndpoint): string {
+  const pid = Math.trunc(endpoint.pid);
+  const httpPort = Math.trunc(endpoint.httpPort);
+  return [
+    `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}" | Select-Object Name,ProcessId,ExecutablePath,CommandLine;`,
+    `$o = @(Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort ${httpPort} -ErrorAction SilentlyContinue | Where-Object { $_.RemotePort -eq 0 -and ($_.State -in @('Listen','Bound') -or [int]$_.State -eq 0) } | ForEach-Object { $_.OwningProcess });`,
+    '[pscustomobject]@{ Process = $p; PortOwners = $o } | ConvertTo-Json -Compress -Depth 3'
+  ].join(' ');
+}
+
 // The token sits only on the server's command line; it is read for this one
 // request and never stored or logged.
 function readLanguageServerCsrfToken(endpoint: LanguageServerEndpoint): Promise<string | null> {
   if (process.platform !== 'win32') {
     return Promise.resolve(null);
   }
-  const script = [
-    `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${endpoint.pid}" | Select-Object Name,ProcessId,ExecutablePath,CommandLine;`,
-    `$o = @(Get-NetTCPConnection -State Listen -LocalAddress 127.0.0.1 -LocalPort ${endpoint.httpPort} -ErrorAction SilentlyContinue | ForEach-Object { $_.OwningProcess });`,
-    '[pscustomobject]@{ Process = $p; PortOwners = $o } | ConvertTo-Json -Compress -Depth 3'
-  ].join(' ');
+  const script = buildLanguageServerLookupScript(endpoint);
   return new Promise((resolve) => {
     execFile('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
       { windowsHide: true, timeout: LS_LOOKUP_TIMEOUT_MS }, (error, stdout) => {

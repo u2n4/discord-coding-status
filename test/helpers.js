@@ -34,8 +34,26 @@ function createTestEnvironment(t, overrides = {}) {
   const nodeOptions = [process.env.NODE_OPTIONS, `--require=${RPC_MOCK}`]
     .filter(Boolean)
     .join(' ');
+  // A parent Grok or T3 session exports GROK_SESSION_ID / T3CODE_THREAD_ID /
+  // ACP markers. Hooks treat those as an embedded T3 or Grok run, so drop the
+  // inherited signals here; a test that needs them passes them in overrides.
+  const inherited = { ...process.env };
+  for (const key of [
+    'GROK_EVENT',
+    'GROK_SESSION_ID',
+    'GROK_MESSAGE',
+    'GROK_DIR',
+    'GROK_BIN',
+    'T3CODE_THREAD_ID',
+    'T3_ACP_MCP_ENDPOINT',
+    'AGY_ACP_FORCE_FILE_STORAGE',
+    'ANTIGRAVITY_APP_DATA_DIR',
+    'ANTIGRAVITY_AGENTAPI_EXE'
+  ]) {
+    delete inherited[key];
+  }
   const env = {
-    ...process.env,
+    ...inherited,
     FORCE_COLOR: '0',
     NODE_OPTIONS: nodeOptions,
     DISCORD_CLIENT_ID: '',

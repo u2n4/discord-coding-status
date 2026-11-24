@@ -19,6 +19,13 @@ export interface StateCommandContext {
   isGrokAncestry: () => boolean;
 }
 
+function isT3HostedHookEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(
+    String(env.T3CODE_THREAD_ID || '').trim()
+    || String(env.T3_ACP_MCP_ENDPOINT || '').trim()
+  );
+}
+
 export function runStateCommand(
   command: string,
   args: Record<string, string | boolean>,
@@ -37,6 +44,15 @@ export function runStateCommand(
     const sessionId = (args['session-id'] || args.session_id || args['sessionId']) as string | undefined;
     context.clearState(sessionId || undefined);
     console.log(pc.green(`✔ ${sessionId ? `Cleared session ${sessionId}` : 'Cleared all active sessions'}`));
+    return true;
+  }
+
+  // Embedded agent turns spawned by T3 Code are represented by T3 Code itself;
+  // their global hooks must not hijack Discord as a standalone tool.
+  if (isT3HostedHookEnv() && ['codex-hook', 'claude-hook', 'grok-hook', 'muse-hook', 'antigravity-hook'].includes(command)) {
+    if (command === 'antigravity-hook') {
+      process.stdout.write('{}\n');
+    }
     return true;
   }
 

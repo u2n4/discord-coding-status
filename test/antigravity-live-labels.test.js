@@ -94,6 +94,15 @@ test('csrf token is taken only from the pid-matched Antigravity language server 
   assert.equal(live.parseLanguageServerLookup(null, endpoint), null);
 });
 
+test('language server lookup script matches passive 127.0.0.1 sockets even when Windows reports State 0', () => {
+  const script = live.buildLanguageServerLookupScript({ pid: 243668, httpPort: 52778 });
+  assert.match(script, /ProcessId=243668/);
+  assert.match(script, /-LocalAddress 127\.0\.0\.1 -LocalPort 52778/);
+  assert.doesNotMatch(script, /-State Listen/);
+  assert.match(script, /RemotePort -eq 0/);
+  assert.match(script, /\[int\]\$_\.State -eq 0/);
+});
+
 test('labels are fetched from the language server with its csrf header', async (t) => {
   let seen = null;
   const server = http.createServer((request, response) => {

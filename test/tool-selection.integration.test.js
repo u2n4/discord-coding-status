@@ -79,3 +79,24 @@ test('merging keeps one tool per family with the hook report ahead of the proces
   assert.equal(merged[0].source, 'hook', 'the hook report represents the claude family');
   assert.equal(selectNewestTool(merged).family, 'claude');
 });
+
+test('unfocused fallback follows priority claude -> codex -> antigravity -> running -> null', () => {
+  const antigravity = hookTool('antigravity', 1_000);
+  const codex = hookTool('codex', 30_000);
+  const claude = hookTool('claude', 60_000);
+  const opencode = processTool('opencode');
+
+  // Even when antigravity or codex is newer, unfocused fallback prefers claude first.
+  assert.equal(selectNewestTool([antigravity, codex, claude, opencode]).family, 'claude');
+  // Without claude, codex beats newer antigravity and opencode.
+  assert.equal(selectNewestTool([antigravity, codex, opencode]).family, 'codex');
+  // Without claude or codex, antigravity beats other running tools.
+  assert.equal(selectNewestTool([opencode, antigravity]).family, 'antigravity');
+  // Without any of the top 3, falls back to whatever else is running, or null if empty.
+  assert.equal(selectNewestTool([opencode]).family, 'opencode');
+  assert.equal(selectNewestTool([]), null);
+
+  // Explicit/remembered preferredFamily still overrides fallback priority.
+  assert.equal(selectNewestTool([antigravity, codex, claude], 'antigravity').family, 'antigravity');
+  assert.equal(selectNewestTool([antigravity, codex, claude], 'codex').family, 'codex');
+});

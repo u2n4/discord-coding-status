@@ -10,6 +10,7 @@ import { grokProviders, DEFAULT_GROK_CLIENT_ID } from './grok/provider';
 import { cursorProviders, DEFAULT_CURSOR_CLIENT_ID } from './cursor/provider';
 import { museProviders, DEFAULT_MUSE_CLIENT_ID } from './muse/provider';
 import { antigravityProviders, DEFAULT_ANTIGRAVITY_CLIENT_ID } from './antigravity/provider';
+import { t3Providers, DEFAULT_T3_CLIENT_ID } from './t3/provider';
 
 export {
   DEFAULT_CLAUDE_CLIENT_ID,
@@ -19,7 +20,8 @@ export {
   DEFAULT_GROK_CLIENT_ID,
   DEFAULT_CURSOR_CLIENT_ID,
   DEFAULT_MUSE_CLIENT_ID,
-  DEFAULT_ANTIGRAVITY_CLIENT_ID
+  DEFAULT_ANTIGRAVITY_CLIENT_ID,
+  DEFAULT_T3_CLIENT_ID
 };
 
 export function validateToolProviders(providers: readonly ToolProvider[]): void {
@@ -72,7 +74,8 @@ const builtInProviders: readonly ToolProvider[] = [
   ...grokProviders,
   ...cursorProviders,
   ...museProviders,
-  ...antigravityProviders
+  ...antigravityProviders,
+  ...t3Providers
 ];
 validateToolProviders(builtInProviders);
 

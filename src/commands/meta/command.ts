@@ -19,6 +19,7 @@ export interface MetaCommandContext {
   cursorClientId: string;
   museClientId: string;
   antigravityClientId: string;
+  t3ClientId: string;
   configFile: string;
   stateFile: string;
 }
@@ -67,6 +68,7 @@ ${pc.bold('Default Discord Application IDs:')}
   Cursor: ${accent(context.cursorClientId)}
   Muse Code: ${accent(context.museClientId)}
   Antigravity: ${accent(context.antigravityClientId)}
+  T3 Code: ${accent(context.t3ClientId || 'not set — add t3ClientId')}
 
 ${pc.bold('Config file:')}
   ${accent(context.configFile)}

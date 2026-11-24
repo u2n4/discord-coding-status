@@ -8,7 +8,7 @@ import * as fs from 'node:fs';
 // trigger via the state watcher; this covers bound process-model changes with
 // no new focus event.
 
-const DEBOUNCE_MS = 50;
+const DEBOUNCE_MS = 25;
 
 let watchedFile: string | null = null;
 let watcher: fs.FSWatcher | null = null;

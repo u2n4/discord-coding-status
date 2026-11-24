@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { spawn } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 
 const { getActivitySignature, selectNewestTool } = require('../dist/presence');
 const {
@@ -15,6 +15,7 @@ const {
 } = require('../dist/core/detection/claude-desktop-model');
 const {
   buildClaudeDesktopModelSamplerScript,
+  CLAUDE_DESKTOP_PANE_PICKER,
   applyClaudeDesktopDisplayOverride,
   getVerifiedClaudeDesktopModel,
   setVerifiedClaudeDesktopModel,
@@ -107,8 +108,11 @@ test('genuine model/app/payload changes produce a new signature', () => {
 test('foreground Codex wins over a newer background Muse hook (no takeover)', () => {
   const now = Date.now();
   const museNewer = { key: 'state:muse', family: 'muse', source: 'hook', updatedAt: now, details: 'Model: muse-new', state: '' };
+  const grokOlder = { key: 'state:grok', family: 'grok', source: 'hook', updatedAt: now - 60000, details: 'Model: grok-old', state: '' };
   const codexOlder = { key: 'state:codex', family: 'codex', source: 'hook', updatedAt: now - 60000, details: 'Model: codex-old', state: '' };
-  assert.equal(selectNewestTool([museNewer, codexOlder]), museNewer, 'baseline: newest wins without focus');
+  assert.equal(selectNewestTool([museNewer, grokOlder]), museNewer, 'baseline: newest wins among non-priority tools');
+  assert.equal(selectNewestTool([museNewer, codexOlder]), codexOlder, 'unfocused fallback prefers codex over muse');
+  assert.equal(selectNewestTool([museNewer, codexOlder], 'muse'), museNewer, 'explicit focus on muse overrides fallback priority');
   assert.equal(selectNewestTool([museNewer, codexOlder], 'codex'), codexOlder, 'foreground family wins over newer background');
   assert.equal(selectNewestTool([codexOlder, museNewer], 'codex'), codexOlder);
 });
@@ -219,6 +223,10 @@ test('Desktop UI label binds positive PID/control and rejects wrong PID/Menu/amb
   assert.equal(selectClaudeDesktopModel([button({ controlType: 'MenuItem' })], binding), null);
 
   assert.equal(selectClaudeDesktopModel([button({}), button({})], binding), null, 'ambiguous duplicate buttons fail closed');
+  const sonnet = { name: 'Model: Sonnet 5.5 High', modelChildLabel: 'Sonnet 5.5' };
+  assert.equal(selectClaudeDesktopModel([button({}), button({ ...sonnet, focusedPane: true })], binding), 'Sonnet 5.5', 'split view follows the focused pane');
+  assert.equal(selectClaudeDesktopModel([button({ focusedPane: true }), button(sonnet)], binding), 'Opus 5.5');
+  assert.equal(selectClaudeDesktopModel([button({ focusedPane: true }), button({ ...sonnet, focusedPane: true })], binding), null, 'two focused panes fail closed');
 
   assert.equal(selectClaudeDesktopModel([button({ modelChildLabel: null })], binding), null, 'missing child fails closed');
   assert.equal(selectClaudeDesktopModel([button({ modelChildLabel: '' })], binding), null);
@@ -288,6 +296,26 @@ test('Desktop override replaces a stale sibling CLI label; null override preserv
   clearVerifiedClaudeDesktopModel();
   assert.equal(getVerifiedClaudeDesktopModel(), null);
   resetClaudeDesktopModelCacheForTests();
+});
+
+test('split view picks the Model button in the pane holding the focus', { skip: process.platform !== 'win32' }, () => {
+  const list = (ids) => `([System.Collections.ArrayList]@(${ids.map((id) => `'${id}'`).join(',')}))`;
+  const paneA = ['buttonA', 'a', 'shared', 'window'];
+  const paneB = ['buttonB', 'b', 'shared', 'window'];
+  const pick = (focus) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    `${CLAUDE_DESKTOP_PANE_PICKER}; Select-WatchPane ${list(focus)} @(${list(paneA)},${list(paneB)})`
+  ], { encoding: 'utf8' }).trim();
+
+  assert.equal(pick(['composer', 'a', 'shared', 'window']), '0');
+  assert.equal(pick(['usage', 'b', 'shared', 'window']), '1');
+  assert.equal(pick(paneB), '1', 'focus on the Model button itself');
+  assert.equal(pick(['sidebar', 'shared', 'window']), '-1', 'outside every pane');
+  assert.equal(pick(['other', 'tree']), '-1', 'no shared ancestor');
+
+  // PowerShell parses the whole sampler, so a syntax slip fails here and not in the field.
+  assert.equal(execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    '$source=[Console]::In.ReadToEnd(); [void][scriptblock]::Create($source); "parsed"'
+  ], { input: buildClaudeDesktopModelSamplerScript(23764, 4242, 500), encoding: 'utf8' }).trim(), 'parsed');
 });
 
 test('Desktop sampler script is Button-scoped, prefix-filtered, and orphan-safe', () => {

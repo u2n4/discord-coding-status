@@ -72,6 +72,7 @@ import {
   DEFAULT_CURSOR_CLIENT_ID,
   DEFAULT_MUSE_CLIENT_ID,
   DEFAULT_ANTIGRAVITY_CLIENT_ID,
+  DEFAULT_T3_CLIENT_ID,
   requireToolPresence,
   toolProviders
 } from './providers/registry';
@@ -104,6 +105,7 @@ import {
   CURSOR_CLIENT_ID,
   MUSE_CLIENT_ID,
   ANTIGRAVITY_CLIENT_ID,
+  T3_CLIENT_ID,
   DETAIL_LEVEL,
   CODEX_QUOTA_SOURCE,
   CODEX_BIN,
@@ -462,6 +464,12 @@ function compactConfigEntries(entries: Record<string, string>): Record<string, s
   );
   setConfigIfCustom(
     next,
+    'DISCORD_CODING_STATUS_T3_CLIENT_ID',
+    entries.DISCORD_CODING_STATUS_T3_CLIENT_ID || DEFAULT_T3_CLIENT_ID,
+    DEFAULT_T3_CLIENT_ID
+  );
+  setConfigIfCustom(
+    next,
     'DISCORD_CODING_STATUS_DETAIL_LEVEL',
     detailLevel,
     DEFAULT_DETAIL_LEVEL
@@ -500,6 +508,7 @@ function compactConfigEntries(entries: Record<string, string>): Record<string, s
     'DISCORD_CODING_STATUS_CODEX_IMAGE_KEY',
     'DISCORD_CODING_STATUS_OPENCODE_IMAGE_KEY',
     'DISCORD_CODING_STATUS_PI_IMAGE_KEY',
+    'DISCORD_CODING_STATUS_T3_IMAGE_KEY',
     'DISCORD_LARGE_IMAGE_KEY',
     'DISCORD_SMALL_IMAGE_KEY',
     'DISCORD_CODING_STATUS_PLAN_TEXT',
@@ -818,6 +827,7 @@ async function main(): Promise<void> {
     cursorClientId: CURSOR_CLIENT_ID,
     museClientId: MUSE_CLIENT_ID,
     antigravityClientId: ANTIGRAVITY_CLIENT_ID,
+    t3ClientId: T3_CLIENT_ID,
     configFile: CONFIG_FILE,
     stateFile: STATE_FILE
   })) {

@@ -324,10 +324,36 @@ export function isAntigravityCliConversation(conversationId: string, transcriptP
   }
 }
 
+export function isAntigravityAcpSession(
+  transcriptPath: string | null,
+  env: NodeJS.ProcessEnv = process.env
+): boolean {
+  if (
+    String(env.AGY_ACP_FORCE_FILE_STORAGE || '').trim()
+    || String(env.T3CODE_THREAD_ID || '').trim()
+    || String(env.T3_ACP_MCP_ENDPOINT || '').trim()
+  ) {
+    return true;
+  }
+  const appDataDir = String(env.ANTIGRAVITY_APP_DATA_DIR || '').replace(/\\/g, '/').toLowerCase();
+  if (appDataDir.includes('/antigravity-acp') || appDataDir.endsWith('antigravity-acp')) {
+    return true;
+  }
+  const transcript = String(transcriptPath || '').replace(/\\/g, '/').toLowerCase();
+  return transcript.includes('/antigravity-acp/') || transcript.includes('/.t3/userdata/providers/antigravity/');
+}
+
 export function antigravityHookSessionFromArgs(
   args: Record<string, string | boolean>
-): HookSessionState {
+): HookSessionState | null {
   const input = readHookInput();
+  const transcriptPath = typeof input.transcriptPath === 'string'
+    ? input.transcriptPath.trim()
+    : (typeof input.transcript_path === 'string' ? input.transcript_path.trim() : null);
+  if (isAntigravityAcpSession(transcriptPath)) {
+    return null;
+  }
+
   const event = String(
     getArgString(args, 'event')
     || input.hook_event_name
@@ -351,10 +377,6 @@ export function antigravityHookSessionFromArgs(
     || input.cwd
     || process.cwd()
   ).trim();
-
-  const transcriptPath = typeof input.transcriptPath === 'string'
-    ? input.transcriptPath.trim()
-    : (typeof input.transcript_path === 'string' ? input.transcript_path.trim() : null);
 
   let status = 'working';
   let activity = 'Working in Antigravity';

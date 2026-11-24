@@ -27,7 +27,14 @@ import type { ActiveTool } from '../../core/tools/types';
 // its Desktop window is foreground and restarts only on window/PID change.
 // The 120ms foreground sampler stays unblocked (separate process); model
 // polling runs at 500ms with a cached button selector (fast path re-reads
-// the cached element; slow Button-only FindAll runs only on cache miss).
+// the cached element; slow Button-only FindAll runs on a cache miss, when the
+// focus moves in split view, and every BUTTON_RESCAN_EVERY_TICKS, because a
+// second pane opens without the cached button failing).
+//
+// Split view has one Model button per pane. The pane in use holds the keyboard
+// focus: walking up from the focused element, the first ancestor that contains
+// exactly one Model button is that pane. Only runtime ids are read on the way.
+// Focus outside every pane keeps the last pick.
 //
 // Managed UIA notes (see core/detection/claude-desktop-model.ts for URLs):
 // managed PropertyConditionFlags has no MatchSubstring, so the "Model:"
@@ -38,8 +45,15 @@ export const CLAUDE_DESKTOP_MODEL_SAMPLE_MS_DEFAULT = 500;
 export const CLAUDE_DESKTOP_MODEL_SAMPLE_MS_MIN = 250;
 export const CLAUDE_DESKTOP_MODEL_SAMPLE_MS_MAX = 2000;
 const PARENT_CHECK_EVERY_TICKS = 2;
+const BUTTON_RESCAN_EVERY_TICKS = 10;
 const MAX_CONSECUTIVE_FAILURES = 20;
 const LF = String.fromCharCode(10);
+
+// Both take runtime-id chains, element first and window last. Returns the index
+// of the one button chain that shares a pane with the focus, or -1 when the
+// focus chain first meets several of them, which means it is outside every pane.
+export const CLAUDE_DESKTOP_PANE_PICKER = `function Select-WatchPane($watchFocusChain, $watchButtonChains) { foreach ($watchId in $watchFocusChain) { $watchHits=@(); for ($watchI=0; $watchI -lt $watchButtonChains.Count; $watchI++) { if ($watchButtonChains[$watchI].Contains($watchId)) { $watchHits+=$watchI } }; if ($watchHits.Count -eq 1) { return $watchHits[0] }; if ($watchHits.Count -gt 1) { return -1 } }; return -1 }`;
+const CLAUDE_DESKTOP_CHAIN_READER = `function Get-WatchChain($watchEl) { $watchIds=New-Object System.Collections.ArrayList; $watchCur=$watchEl; for ($watchI=0; $watchI -lt 64 -and $watchCur -ne $null; $watchI++) { [void]$watchIds.Add([string]::Join('.',$watchCur.GetRuntimeId())); $watchCur=$watchWalker.GetParent($watchCur) }; return ,$watchIds }`;
 
 function clampSampleMs(sampleMs: number): number {
   const floored = Math.floor(sampleMs);
@@ -95,6 +109,11 @@ export function buildClaudeDesktopModelSamplerScript(
     `$watchTicks=0`,
     `$watchFail=0`,
     `$watchButton=$null`,
+    `$watchSplit=$false`,
+    `$watchFocusId=''`,
+    `$watchWalker=[System.Windows.Automation.TreeWalker]::ControlViewWalker`,
+    CLAUDE_DESKTOP_PANE_PICKER,
+    CLAUDE_DESKTOP_CHAIN_READER,
     `$watchStdin=$null`,
     `$watchAsync=$null`,
     `$watchBuf=$null`,
@@ -106,11 +125,13 @@ export function buildClaudeDesktopModelSamplerScript(
     ` try { $watchHwnd=[Win32.ClaudeDesktopModelSampler]::GetForegroundWindow(); if ($watchHwnd -ne $null -and $watchHwnd -ne [IntPtr]::Zero) { $watchOwner=[uint32]0; $watchTid=[Win32.ClaudeDesktopModelSampler]::GetWindowThreadProcessId($watchHwnd,[ref]$watchOwner); if ($watchTid -ne 0 -and $watchOwner -ne 0) { $watchFg=[int]$watchOwner; $watchFail=0 } else { $watchFail++; $watchFg=0 } } else { $watchFail=0; $watchFg=0; $watchHwnd=[IntPtr]::Zero } } catch { $watchFail++; $watchFg=0; $watchHwnd=[IntPtr]::Zero; if ($watchFail -ge ${MAX_CONSECUTIVE_FAILURES}) { Write-Error ("claude desktop model native api failed: " + $_.Exception.Message); exit 3 } }`,
     ` if ($watchFail -ge ${MAX_CONSECUTIVE_FAILURES}) { Write-Error ("claude desktop model native api failed consecutively"); exit 3 }`,
     ` $watchState='UNAVAILABLE'`,
-    ` if ($watchFg -ne $watchExpected) { $watchButton=$null; $watchState='UNBOUND' } else {`,
+    ` if ($watchFg -ne $watchExpected) { $watchButton=$null; $watchSplit=$false; $watchFocusId=''; $watchState='UNBOUND' } else {`,
     ` try { $watchRoot=[System.Windows.Automation.AutomationElement]::FromHandle($watchHwnd); if ($watchRoot -ne $null -and $watchRoot.Current.ProcessId -eq $watchExpected) {`,
     ` $watchFound=$null`,
     ` if ($watchButton -ne $null) { try { $watchCachedName=$watchButton.Current.Name; if ($watchCachedName -ne $null -and $watchCachedName.Trim().StartsWith('Model:')) { $watchFound=$watchButton } else { $watchButton=$null } } catch { $watchButton=$null } }`,
-    ` if ($watchFound -eq $null) { $watchCond=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button); $watchButtons=$watchRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, $watchCond); $watchMatch=$null; $watchMatchCount=0; foreach ($watchB in $watchButtons) { try { $watchN=$watchB.Current.Name } catch { continue }; if ($watchN -ne $null -and $watchN.Trim().StartsWith('Model:')) { $watchMatchCount++; if ($watchMatchCount -eq 1) { $watchMatch=$watchB } } }; if ($watchMatchCount -eq 1) { $watchFound=$watchMatch; $watchButton=$watchMatch } else { $watchButton=$null } }`,
+    ` $watchNowFocus=$null; $watchNowId=''`,
+    ` if ($watchSplit -or $watchFound -eq $null) { try { $watchNowFocus=[System.Windows.Automation.AutomationElement]::FocusedElement; if ($watchNowFocus -ne $null -and $watchNowFocus.Current.ProcessId -eq $watchExpected) { $watchNowId=[string]::Join('.',$watchNowFocus.GetRuntimeId()) } else { $watchNowFocus=$null } } catch { $watchNowFocus=$null; $watchNowId='' } }`,
+    ` if ($watchFound -eq $null -or ($watchTicks % ${BUTTON_RESCAN_EVERY_TICKS}) -eq 0 -or ($watchSplit -and $watchNowId -ne $watchFocusId)) { $watchCond=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button); $watchButtons=$watchRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, $watchCond); $watchMatches=New-Object System.Collections.ArrayList; foreach ($watchB in $watchButtons) { try { $watchN=$watchB.Current.Name } catch { continue }; if ($watchN -ne $null -and $watchN.Trim().StartsWith('Model:')) { [void]$watchMatches.Add($watchB) } }; $watchSplit=$watchMatches.Count -gt 1; $watchFocusId=$watchNowId; if ($watchMatches.Count -eq 1) { $watchFound=$watchMatches[0]; $watchButton=$watchFound } elseif ($watchMatches.Count -eq 0) { $watchFound=$null; $watchButton=$null } elseif ($watchNowFocus -ne $null) { $watchPane=-1; try { $watchChains=New-Object System.Collections.ArrayList; foreach ($watchB in $watchMatches) { [void]$watchChains.Add((Get-WatchChain $watchB)) }; $watchPane=Select-WatchPane (Get-WatchChain $watchNowFocus) $watchChains } catch { $watchPane=-1 }; if ($watchPane -ge 0) { $watchFound=$watchMatches[$watchPane]; $watchButton=$watchFound } } }`,
     ` if ($watchFound -ne $null) { try { $watchChildCond=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text); $watchChild=$watchFound.FindFirst([System.Windows.Automation.TreeScope]::Children, $watchChildCond); if ($watchChild -ne $null) { $watchLabel=$watchChild.Current.Name; if ($watchLabel -ne $null) { $watchLabel=$watchLabel.Trim(); if ($watchLabel -ne '' -and $watchLabel.Length -le ${CLAUDE_DESKTOP_MODEL_LABEL_MAX_LENGTH}) { $watchState='MODEL|'+$watchLabel } } } } catch { $watchState='UNAVAILABLE' } }`,
     ` }; $watchFail=0 } catch { $watchFail++; if ($watchFail -ge ${MAX_CONSECUTIVE_FAILURES}) { Write-Error ("claude desktop model uia failed: " + $_.Exception.Message); exit 3 } }`,
     ` }`,

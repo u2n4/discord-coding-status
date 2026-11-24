@@ -11,6 +11,9 @@ const {
   isOpencodeProcess,
   isPiProcess,
   isGrokProcess,
+  isAntigravityCliProcess,
+  isT3CodeProcess,
+  isT3NightlyProcess,
   parseWindowsStartApps,
   windowsDesktopAppDetail
 } = require('../dist/core/detection/tool-detection');
@@ -108,11 +111,29 @@ test('Claude Desktop, Claude Code, and the URL handler remain separate', () => {
 test('package-manager wrappers remain valid CLI processes', () => {
   const claudeWrapper = 'node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js';
   const codexWrapper = 'node /usr/local/lib/node_modules/@openai/codex/bin/codex.js';
+  const codexNodeAppServer = {
+    line: 'C:\\Program Files\\nodejs\\node.exe "node" "C:\\Users\\example\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js" app-server',
+    executablePath: 'C:\\Program Files\\nodejs\\node.exe',
+    commandLine: '"node" "C:\\Users\\example\\AppData\\Roaming\\npm\\node_modules\\@openai\\codex\\bin\\codex.js" app-server'
+  };
+  const nodeEvalMentioningDotCodex = {
+    line: 'C:\\Program Files\\nodejs\\node.exe node -e "const p=require(\'path\'); p.join(\'~/.codex/plugins/cache/claude-mem\')"',
+    executablePath: 'C:\\Program Files\\nodejs\\node.exe',
+    commandLine: 'node -e "const p=require(\'path\'); p.join(\'~/.codex/plugins/cache/claude-mem\')"'
+  };
+  const shellMentioningNodeAndCodex = {
+    line: 'powershell.exe -Command "node test.js codex"',
+    executablePath: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    commandLine: 'powershell.exe -Command "node test.js codex"'
+  };
 
   assert.equal(isClaudeCodeProcess(claudeWrapper), true);
   assert.equal(isClaudeDesktopProcess(claudeWrapper), false);
   assert.equal(isCodexCliProcess(codexWrapper), true);
   assert.equal(isCodexDesktopProcess(codexWrapper), false);
+  assert.equal(isCodexCliProcess(codexNodeAppServer), false);
+  assert.equal(isCodexCliProcess(nodeEvalMentioningDotCodex), false);
+  assert.equal(isCodexCliProcess(shellMentioningNodeAndCodex), false);
 });
 
 test('OpenCode CLI processes are detected without capturing other tools', () => {
@@ -198,4 +219,86 @@ test('Grok Code processes are detected without capturing unrelated text', () => 
   ]) {
     assert.equal(isGrokProcess(unrelated), false);
   }
+});
+
+test('T3 Code matches the desktop exe and Mac bundle, not the resource monitor or a folder name', () => {
+  const beta = {
+    line: 'C:\\Users\\aliha\\AppData\\Local\\Programs\\t3code\\T3 Code (Beta).exe',
+    executablePath: 'C:\\Users\\aliha\\AppData\\Local\\Programs\\t3code\\T3 Code (Beta).exe',
+    commandLine: '"C:\\Users\\aliha\\AppData\\Local\\Programs\\t3code\\T3 Code (Beta).exe"'
+  };
+  const nightly = {
+    line: 'C:\\Users\\aliha\\AppData\\Local\\Programs\\t3code\\T3 Code (Nightly).exe',
+    executablePath: 'C:\\Users\\aliha\\AppData\\Local\\Programs\\t3code\\T3 Code (Nightly).exe',
+    commandLine: '"C:\\Users\\aliha\\AppData\\Local\\Programs\\t3code\\T3 Code (Nightly).exe"'
+  };
+  const alpha = {
+    line: 'C:\\Programs\\t3code\\T3 Code (Alpha).exe',
+    executablePath: 'C:\\Programs\\t3code\\T3 Code (Alpha).exe'
+  };
+  const uninstaller = {
+    line: 'C:\\Users\\aliha\\AppData\\Local\\Programs\\t3code\\Uninstall T3 Code (Nightly).exe',
+    executablePath: 'C:\\Users\\aliha\\AppData\\Local\\Programs\\t3code\\Uninstall T3 Code (Nightly).exe'
+  };
+  const stable = {
+    line: 'C:\\Programs\\t3code\\T3 Code.exe',
+    executablePath: 'C:\\Programs\\t3code\\T3 Code.exe'
+  };
+  const mac = {
+    line: '/Applications/T3 Code.app/Contents/MacOS/T3 Code',
+    executablePath: '/Applications/T3 Code.app/Contents/MacOS/T3 Code'
+  };
+  const macNightly = {
+    line: '/Applications/T3 Code (Nightly).app/Contents/MacOS/T3 Code (Nightly)',
+    executablePath: '/Applications/T3 Code (Nightly).app/Contents/MacOS/T3 Code (Nightly)'
+  };
+  const projectMention = {
+    line: 'C:\\Program Files\\nodejs\\node.exe C:\\Users\\aliha\\codAi\\projects\\t3code\\server.js',
+    executablePath: 'C:\\Program Files\\nodejs\\node.exe',
+    commandLine: 'node C:\\Users\\aliha\\codAi\\projects\\t3code\\server.js'
+  };
+  const monitor = {
+    line: 'C:\\Tools\\t3-resource-monitor.exe',
+    executablePath: 'C:\\Tools\\t3-resource-monitor.exe'
+  };
+
+  assert.equal(isT3CodeProcess(beta), true);
+  assert.equal(isT3CodeProcess(nightly), true);
+  assert.equal(isT3CodeProcess(alpha), true);
+  assert.equal(isT3CodeProcess(stable), true);
+  assert.equal(isT3CodeProcess('C:\\Programs\\t3code.exe'), true);
+  assert.equal(isT3CodeProcess(mac), true);
+  assert.equal(isT3CodeProcess(macNightly), true);
+  assert.equal(isT3CodeProcess(uninstaller), false);
+  assert.equal(isT3CodeProcess(projectMention), false);
+  assert.equal(isT3CodeProcess(monitor), false);
+  assert.equal(isT3CodeProcess('C:\\Tools\\grok.exe'), false);
+
+  assert.equal(isT3NightlyProcess(nightly), true);
+  assert.equal(isT3NightlyProcess(macNightly), true);
+  assert.equal(isT3NightlyProcess(beta), false);
+  assert.equal(isT3NightlyProcess(stable), false);
+  assert.equal(isT3NightlyProcess(uninstaller), false);
+});
+
+test('Antigravity CLI ignores headless agy acp servers spawned by T3 Code', () => {
+  const interactive = {
+    line: 'C:\\Users\\aliha\\AppData\\Local\\Programs\\agy\\agy.exe',
+    executablePath: 'C:\\Users\\aliha\\AppData\\Local\\Programs\\agy\\agy.exe',
+    commandLine: '"C:\\Users\\aliha\\AppData\\Local\\Programs\\agy\\agy.exe"'
+  };
+  const t3Acp = {
+    line: 'C:\\Users\\aliha\\.t3\\tools\\antigravity-acp\\win32-x64\\versions\\abc\\agy.exe acp --gemini-dir C:\\Users\\aliha\\.t3\\userdata\\providers\\antigravity\\123 --app-data-dir antigravity-acp',
+    executablePath: 'C:\\Users\\aliha\\.t3\\tools\\antigravity-acp\\win32-x64\\versions\\abc\\agy.exe',
+    commandLine: 'C:\\Users\\aliha\\.t3\\tools\\antigravity-acp\\win32-x64\\versions\\abc\\agy.exe acp --gemini-dir C:\\Users\\aliha\\.t3\\userdata\\providers\\antigravity\\123 --app-data-dir antigravity-acp'
+  };
+  const unixAcp = {
+    line: '/home/user/.t3/tools/antigravity-acp/agy acp --app-data-dir antigravity-acp',
+    executablePath: '/home/user/.t3/tools/antigravity-acp/agy',
+    commandLine: '/home/user/.t3/tools/antigravity-acp/agy acp --app-data-dir antigravity-acp'
+  };
+
+  assert.equal(isAntigravityCliProcess(interactive), true);
+  assert.equal(isAntigravityCliProcess(t3Acp), false);
+  assert.equal(isAntigravityCliProcess(unixAcp), false);
 });

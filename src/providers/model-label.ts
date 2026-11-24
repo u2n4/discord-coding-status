@@ -5,6 +5,7 @@ import * as path from 'node:path';
 
 import { getCodexHomeDirectory } from './codex/model';
 import { getGrokHomeDirectory } from './grok/model';
+import { lookupT3ModelName, resetT3ModelCacheForTests } from './t3/model';
 
 // Turns a resolved model id into the label the tool itself shows, so Discord
 // reads the same as the model picker the user just used. Each tool's own
@@ -97,6 +98,32 @@ function grokNames(): Map<string, string> {
 
 export function resetModelLabelCacheForTests(): void {
   nameCaches.clear();
+  resetT3ModelCacheForTests();
+}
+
+const T3_INSTANCE_SURFACE: Record<string, ModelLabelSurface> = {
+  grok: { family: 'grok' },
+  claudeagent: { family: 'claude' },
+  claude: { family: 'claude' },
+  codex: { family: 'codex', providerId: 'codexApp' },
+  antigravity: { family: 'antigravity' },
+  muse: { family: 'muse' },
+  cursor: { family: 'cursor' },
+  opencode: { family: 'opencode' },
+  pi: { family: 'pi' }
+};
+
+function t3Label(id: string, instanceId: string | undefined): string {
+  // A model T3 shares with another tool keeps that tool's label ("Opus 5.5",
+  // "GPT-6.1 Sol", "Grok 4.7"). Anything else uses the name T3's own list shows.
+  const surface = T3_INSTANCE_SURFACE[(instanceId || '').trim().toLowerCase()];
+  if (surface) {
+    const styled = displayModelLabel(surface, id);
+    if (styled && styled !== id) {
+      return styled;
+    }
+  }
+  return lookupT3ModelName(instanceId, id) || id;
 }
 
 // --- per tool ---------------------------------------------------------------
@@ -175,6 +202,10 @@ export function displayModelLabel(surface: string | ModelLabelSurface | undefine
     // variant is a billing mode, not part of the model name.
     const muse = id.match(MUSE_ID);
     return muse ? `Muse ${titleWord(muse[1])} ${muse[2]}` : id;
+  }
+
+  if (family === 't3') {
+    return t3Label(id, providerId);
   }
 
   return id;

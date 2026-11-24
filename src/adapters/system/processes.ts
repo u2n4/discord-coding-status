@@ -83,7 +83,7 @@ export function parseWindowsProcessListJson(stdout: string): ProcessInfo[] {
     .filter((processInfo): processInfo is ProcessInfo => Boolean(processInfo));
 }
 
-const WINDOWS_CENSUS_FILTER = "Name='node.exe' OR Name='bun.exe' OR Name='claude.exe' OR Name='codex.exe' OR Name='ChatGPT.exe' OR Name='grok.exe' OR Name='Antigravity.exe' OR Name='agy.exe' OR Name='Cursor.exe' OR Name='opencode.exe' OR Name='pi.exe' OR Name='pwsh.exe' OR Name='powershell.exe' OR Name='cmd.exe' OR Name='WindowsTerminal.exe' OR Name='conhost.exe' OR Name='OpenConsole.exe' OR Name LIKE 'muse%'";
+const WINDOWS_CENSUS_FILTER = "Name='node.exe' OR Name='bun.exe' OR Name='claude.exe' OR Name='codex.exe' OR Name='ChatGPT.exe' OR Name='grok.exe' OR Name='Antigravity.exe' OR Name='agy.exe' OR Name='Cursor.exe' OR Name='opencode.exe' OR Name='pi.exe' OR Name='pwsh.exe' OR Name='powershell.exe' OR Name='cmd.exe' OR Name='WindowsTerminal.exe' OR Name='conhost.exe' OR Name='OpenConsole.exe' OR Name LIKE 'muse%' OR Name LIKE 'T3 Code (%).exe' OR Name='T3 Code.exe' OR Name='t3code.exe'";
 const WINDOWS_CENSUS_QUERY = [
   `@(Get-CimInstance Win32_Process -Filter "${WINDOWS_CENSUS_FILTER}" |`,
   'Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,UserModeTime,KernelModeTime,CreationDate) |',

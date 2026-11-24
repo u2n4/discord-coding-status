@@ -85,6 +85,7 @@ export const GROK_CLIENT_ID = DISCORD_APPLICATIONS.get('grok')?.clientId || '';
 export const CURSOR_CLIENT_ID = DISCORD_APPLICATIONS.get('cursor')?.clientId || '';
 export const MUSE_CLIENT_ID = DISCORD_APPLICATIONS.get('muse')?.clientId || '';
 export const ANTIGRAVITY_CLIENT_ID = DISCORD_APPLICATIONS.get('antigravity')?.clientId || '';
+export const T3_CLIENT_ID = DISCORD_APPLICATIONS.get('t3')?.clientId || '';
 export const FALLBACK_CLIENT_ID = (process.env.DISCORD_CLIENT_ID || '').trim();
 export const LARGE_IMAGE_KEY = (process.env.DISCORD_LARGE_IMAGE_KEY || '').trim();
 export const SMALL_IMAGE_KEY = (process.env.DISCORD_SMALL_IMAGE_KEY || '').trim();

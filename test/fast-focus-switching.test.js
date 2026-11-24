@@ -11,7 +11,9 @@ const {
   rememberLastFocusedFamily,
   resolveEffectivePreferredFamily,
   getLastFocusedFamily,
-  resetLastFocusedFamilyForTests
+  resetLastFocusedFamilyForTests,
+  ForegroundPidSettler,
+  FOREGROUND_SETTLE_MS
 } = require('../dist/core/selection/last-focused');
 const { selectNewestTool } = require('../dist/presence');
 const { familyForForegroundProcess } = require('../dist/adapters/system/foreground');
@@ -577,4 +579,45 @@ test('foreground helper self-exits on stdin EOF', { skip: process.platform !== '
   }
 
   assert.equal(isPidAlive(child.pid), false, 'no orphan after stdin-EOF exit');
+});
+
+test('ForegroundPidSettler settles initial PID immediately and drops brief focus bounces', async () => {
+  assert.equal(FOREGROUND_SETTLE_MS, 250);
+  const settled = [];
+  const settler = new ForegroundPidSettler((pid) => settled.push(pid), 60);
+
+  try {
+    // First observation emits synchronously so startup has an immediate reading.
+    settler.observe(101);
+    assert.deepEqual(settled, [101]);
+    assert.equal(settler.current(), 101);
+
+    // Duplicate of settled PID does nothing.
+    settler.observe(101);
+    assert.deepEqual(settled, [101]);
+
+    // Brief Alt-Tab / popup bounce (101 -> 202 -> 101 within 60ms) is ignored.
+    settler.observe(202);
+    assert.equal(settler.current(), 101);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    settler.observe(101);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.deepEqual(settled, [101]);
+    assert.equal(settler.current(), 101);
+
+    // Genuine switch held past settleMs commits cleanly.
+    settler.observe(303);
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    assert.deepEqual(settled, [101, 303]);
+    assert.equal(settler.current(), 303);
+
+    // reset() cancels pending switches and restores undefined initial state.
+    settler.observe(404);
+    settler.reset();
+    assert.equal(settler.current(), undefined);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.deepEqual(settled, [101, 303]);
+  } finally {
+    settler.reset();
+  }
 });

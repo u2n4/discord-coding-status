@@ -52,6 +52,10 @@ import {
 } from './providers/antigravity/model';
 import { ensureAntigravityLiveLabels } from './providers/antigravity/live-labels';
 import { displayModelLabel } from './providers/model-label';
+import { readT3Presence, T3_VISIBLE_AGENT_MINIMUM } from './providers/t3/model';
+import { DEFAULT_T3_IMAGE_KEY, DEFAULT_T3_NIGHTLY_IMAGE_KEY } from './providers/t3/provider';
+import { isT3NightlyProcess } from './core/detection/tool-detection';
+import type { ModelLabelSurface } from './providers/model-label';
 import { getCachedProcessList } from './adapters/system/process-cache';
 import type { ActiveTool, ProcessInfo } from './core/tools/types';
 import type {
@@ -679,10 +683,13 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
   }
 
   // Minimal display contract: the Discord application identity already shows
-  // the tool name ("Playing Codex"), so the only published line is the raw
-  // model id. No activity, project, branch, quota, context, package, emoji,
-  // session counts, or timestamps are ever sent to Discord.
+  // the tool name ("Playing Codex"), and the published line is the model.
+  // T3 Code is the one exception: `N agents` is sent as state when at least
+  // five agents are working. No activity, project, branch, quota, context,
+  // package, emoji, or timestamps are ever sent.
   let model = modelTextForPresence(tool);
+  let labelSurface: ModelLabelSurface | ActiveTool = tool;
+  let state = '';
   const updatedAtMs = coerceStateTimestamp(tool.updatedAt) || 0;
 
   // Model fallbacks below only fill a gap or follow a newer persisted pick
@@ -778,12 +785,23 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
       // A current selection we cannot prove beats any older hook model.
       model = null;
     }
+  } else if (tool.family === 't3') {
+    // The thread on screen names the model. A background thread that was never
+    // opened does not. Agent count is a second line, and only at 5 or more.
+    const snapshot = readT3Presence();
+    if (snapshot?.model) {
+      model = truncatePresenceText(snapshot.model);
+      labelSurface = { family: 't3', providerId: snapshot.instanceId || undefined };
+    }
+    if (snapshot && snapshot.workingAgents >= T3_VISIBLE_AGENT_MINIMUM) {
+      state = `${snapshot.workingAgents} agents`;
+    }
   }
 
   return {
     ...tool,
-    details: model ? truncatePresenceText(`Model: ${displayModelLabel(tool, model)}`) : '',
-    state: ''
+    details: model ? truncatePresenceText(`Model: ${displayModelLabel(labelSurface, model)}`) : '',
+    state
   };
 }
 
@@ -820,6 +838,12 @@ export function buildPresence(tool: ActiveTool): PresencePayload {
 
 function largeImageKeyForTool(tool: ActiveTool): string | null {
   const application = discordApplicationForTool(tool, toolProviders, DISCORD_APPLICATIONS);
+  if (tool.family === 't3'
+    && application?.imageKey === DEFAULT_T3_IMAGE_KEY
+    && tool.processInfo
+    && isT3NightlyProcess(tool.processInfo)) {
+    return DEFAULT_T3_NIGHTLY_IMAGE_KEY;
+  }
   return application?.imageKey || LARGE_IMAGE_KEY || null;
 }
 
@@ -905,6 +929,11 @@ function pickSurface(familyTools: ActiveTool[], preferredSurface: 'app' | 'cli' 
   return familyTools.find((tool) => isAppSurface(tool)) || familyTools[0];
 }
 
+// Default priority when nothing is focused or remembered (`preferredFamily`
+// is null or exited): Claude Code/Desktop -> Codex -> Antigravity -> whatever
+// else is currently active -> null (nothing; Discord shows any running game).
+const FALLBACK_FAMILY_PRIORITY = ['claude', 'codex', 'antigravity'] as const;
+
 export function selectNewestTool(
   tools: ActiveTool[],
   preferredFamily: string | null = null,
@@ -925,9 +954,8 @@ export function selectNewestTool(
     return rightTime - leftTime;
   });
 
-  // The foreground window wins: when the user is actively working in one of
-  // the detected tools, that tool is shown even if another tool reported a
-  // hook session more recently.
+  // The foreground (or last-focused) window wins: stay on the last tool the
+  // user actively entered instead of letting a background tool take over.
   const inFamily = (family: string) => ordered.filter((tool) => toolFamilyForTool(tool) === family);
 
   if (preferredFamily) {
@@ -937,13 +965,13 @@ export function selectNewestTool(
     }
   }
 
-  // With neither tool focused nor remembered, Claude wins over Codex even when
-  // Claude has aged out to process-only detection: a Codex hook (often a
-  // subagent Claude started) must not take over the display on its own.
-  if (toolFamilyForTool(ordered[0]) === 'codex') {
-    const claudeTool = pickSurface(inFamily('claude'), null);
-    if (claudeTool) {
-      return claudeTool;
+  // With no active focus or remembered family (including after the remembered
+  // tool exits), fall back in priority order: Claude -> Codex -> Antigravity
+  // -> any other live tool.
+  for (const family of FALLBACK_FAMILY_PRIORITY) {
+    const candidate = pickSurface(inFamily(family), null);
+    if (candidate) {
+      return candidate;
     }
   }
 
