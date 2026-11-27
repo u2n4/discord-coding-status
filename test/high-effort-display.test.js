@@ -235,7 +235,7 @@ test('T3 Code shows XHigh, Max, and Ultracode from SQLite options, hides lower t
     }, '2026-11-27T01:01:00.000Z', 4);
     enriched = await enrichToolForPresence(t3Tool);
     assert.equal(enriched.details, 'Model: Opus 5.5 (XHigh · Ultracode)');
-    assert.equal(enriched.state, '5 agents · 5x Opus 5.5');
+    assert.equal(enriched.state, '5 agents · 4x Opus 5.5');
 
     // Claude ultracode + high hides high and shows only (Ultracode)
     setThread({

@@ -736,8 +736,7 @@ function isVerifiedLiveProcess(info: ProcessInfo | undefined): boolean {
 
 export function formatT3WorkingAgentsState(
   workingAgents: number,
-  agents: readonly T3WorkingAgent[] | undefined,
-  focusedModelLabel?: string | null
+  agents: readonly T3WorkingAgent[] | undefined
 ): string {
   if (workingAgents < T3_VISIBLE_AGENT_MINIMUM) {
     return '';
@@ -747,9 +746,12 @@ export function formatT3WorkingAgentsState(
     return prefix;
   }
 
+  // Omit the focused main thread (already shown on the top `Model:` line) and
+  // merge identical model IDs across providers (e.g. `claude-opus-5-5` under
+  // Antigravity + ClaudeAgent), preferring the shorter canonical label.
   const grouped = new Map<string, { label: string; count: number }>();
   for (const agent of agents) {
-    if (!agent?.model) {
+    if (!agent?.model || agent.isFocused) {
       continue;
     }
     const label = displayModelLabel(
@@ -759,10 +761,13 @@ export function formatT3WorkingAgentsState(
     if (!label) {
       continue;
     }
-    const key = label.toLowerCase();
+    const key = agent.model.trim().toLowerCase();
     const existing = grouped.get(key);
     if (existing) {
       existing.count += 1;
+      if (label.length < existing.label.length) {
+        existing.label = label;
+      }
     } else {
       grouped.set(key, { label, count: 1 });
     }
@@ -772,15 +777,9 @@ export function formatT3WorkingAgentsState(
     return prefix;
   }
 
-  const focusedKey = focusedModelLabel ? focusedModelLabel.trim().toLowerCase() : '';
   const entries = [...grouped.values()].sort((a, b) => {
     if (b.count !== a.count) {
       return b.count - a.count;
-    }
-    const aFocused = focusedKey && a.label.toLowerCase() === focusedKey ? 1 : 0;
-    const bFocused = focusedKey && b.label.toLowerCase() === focusedKey ? 1 : 0;
-    if (bFocused !== aFocused) {
-      return bFocused - aFocused;
     }
     return a.label.localeCompare(b.label);
   });
@@ -995,8 +994,7 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
       labelSurface = { family: 't3', providerId: snapshot.instanceId || undefined };
     }
     if (snapshot && snapshot.workingAgents >= T3_VISIBLE_AGENT_MINIMUM) {
-      const focusedLabel = model ? displayModelLabel(labelSurface, model) : null;
-      state = formatT3WorkingAgentsState(snapshot.workingAgents, snapshot.workingAgentModels, focusedLabel);
+      state = formatT3WorkingAgentsState(snapshot.workingAgents, snapshot.workingAgentModels);
     }
   }
 

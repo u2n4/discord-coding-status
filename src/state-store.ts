@@ -178,6 +178,22 @@ export function unlinkLockIfContentMatches(lockPath: string, expected: string): 
   }
 }
 
+function liveTranscriptMtimeMs(transcriptPath: unknown): number {
+  if (typeof transcriptPath !== 'string' || !transcriptPath.trim()) {
+    return 0;
+  }
+  const filePath = path.resolve(resolveHomePath(transcriptPath.trim()));
+  if (!isLocalTranscriptPath(filePath)) {
+    return 0;
+  }
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() && Number.isFinite(stat.mtimeMs) ? stat.mtimeMs : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
 export function cleanupStateSessions(state: HookStateFile, now = Date.now()): HookStateFile {
   const sessions = Object.fromEntries(
     Object.entries(state.sessions).filter(([, session]) => {
@@ -189,7 +205,17 @@ export function cleanupStateSessions(state: HookStateFile, now = Date.now()): Ho
         return false;
       }
 
-      if (!session.updated_at || now - session.updated_at > STATE_MAX_AGE_MS) {
+      if (!session.updated_at) {
+        return false;
+      }
+
+      // With skipToolHooks enabled, long-running turns (> 15 min) keep writing
+      // to their transcript without firing Pre/PostToolUse hooks; check local
+      // transcript mtime so active sessions are not pruned mid-turn.
+      const lastActivityMs = now - session.updated_at > STATE_MAX_AGE_MS
+        ? Math.max(session.updated_at, liveTranscriptMtimeMs(session.transcript_path))
+        : session.updated_at;
+      if (now - lastActivityMs > STATE_MAX_AGE_MS) {
         return false;
       }
 

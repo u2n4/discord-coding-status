@@ -27,6 +27,7 @@ const EFFORT_SUFFIX = /\s*\((?:minimal|low|medium|high|xhigh|extra high|max|thin
 export interface T3WorkingAgent {
   model: string | null;
   instanceId: string | null;
+  isFocused?: boolean;
 }
 
 export interface T3PresenceSnapshot {
@@ -242,6 +243,8 @@ const MODEL_SQL = `
     AND archived_at IS NULL
     AND json_valid(payload_json)
     AND typeof(json_extract(payload_json, '$.modelSelection.model')) = 'text'
+    AND COALESCE(json_extract(payload_json, '$.lineage.relationshipToParent'), '') <> 'subagent'
+    AND thread_id NOT LIKE 'thread:delegated-task:%'
   ORDER BY
     CASE WHEN json_extract(payload_json, '$.lastVisitedAt') IS NULL THEN 0 ELSE 1 END DESC,
     COALESCE(json_extract(payload_json, '$.lastVisitedAt'), updated_at) DESC
@@ -387,6 +390,24 @@ const SUBAGENT_NODES_FULL_SQL = `
     )
 `;
 
+// Parent threads actively orchestrating one or more running subagents count as
+// working agents even while waiting between turns for their children to finish.
+const ORCHESTRATING_PARENT_SQL = `
+  SELECT DISTINCT
+    s.thread_id AS thread_id,
+    CASE WHEN json_valid(t.payload_json) AND typeof(json_extract(t.payload_json, '$.modelSelection.model')) = 'text'
+         THEN json_extract(t.payload_json, '$.modelSelection.model') END AS model,
+    CASE WHEN json_valid(t.payload_json) AND typeof(json_extract(t.payload_json, '$.modelSelection.instanceId')) = 'text'
+         THEN json_extract(t.payload_json, '$.modelSelection.instanceId') END AS instance_id
+  FROM orchestration_v2_projection_subagents s
+  INNER JOIN orchestration_v2_projection_threads t ON t.thread_id = s.thread_id
+  WHERE s.status IN (${STATUS_LIST})
+    AND s.thread_id IS NOT NULL
+    AND s.thread_id <> ''
+    AND t.deleted_at IS NULL
+    AND t.archived_at IS NULL
+`;
+
 const SUBAGENT_SQL = `
   SELECT COUNT(*) AS total
   FROM orchestration_v2_projection_subagents s
@@ -429,28 +450,36 @@ function tryCountQuery(db: { prepare: (sql: string) => { get: () => any } }, sql
   }
 }
 
+interface RawThreadAgent {
+  threadId: string | null;
+  model: string | null;
+  instanceId: string | null;
+}
+
 function tryAgentsQuery(
   db: { prepare: (sql: string) => { all: () => any[] } },
   sql: string,
   dedupeByThread: boolean
-): T3WorkingAgent[] | null {
+): RawThreadAgent[] | null {
   try {
     const rows = db.prepare(sql).all() as Array<{
       thread_id?: unknown;
       model?: unknown;
       instance_id?: unknown;
     }>;
-    const agents: T3WorkingAgent[] = [];
+    const agents: RawThreadAgent[] = [];
     const seenThreads = dedupeByThread ? new Set<string>() : null;
     for (const row of rows) {
+      let threadId: string | null = null;
       if (seenThreads) {
-        const tid = asText(row?.thread_id);
-        if (!tid || seenThreads.has(tid)) {
+        threadId = asText(row?.thread_id);
+        if (!threadId || seenThreads.has(threadId)) {
           continue;
         }
-        seenThreads.add(tid);
+        seenThreads.add(threadId);
       }
       agents.push({
+        threadId,
         model: asModelId(row?.model),
         instanceId: asText(row?.instance_id)
       });
@@ -536,6 +565,7 @@ function readSnapshot(db: { prepare: (sql: string) => { get: () => any; all: () 
       ultracode: row?.direct_ultracode
     })
     : null;
+  const focusedThreadId = asText(row?.thread_id);
   const seenAtMs = typeof row?.seen_at === 'string' ? Date.parse(row.seen_at) : NaN;
   // Prefer the indexed `runs` table when present; fall back to `nodes` on
   // older schemas or minimal fixtures. A missing subagent table never drops
@@ -544,21 +574,33 @@ function readSnapshot(db: { prepare: (sql: string) => { get: () => any; all: () 
     ?? tryAgentsQuery(db, RUNS_AGENTS_BASIC_SQL, true);
   const usedRuns = runAgents !== null;
   const threadAgents = runAgents ?? (tryAgentsQuery(db, THREAD_AGENTS_LIST_SQL, true) ?? []);
+  const seenThreadIds = new Set(threadAgents.map((entry) => entry.threadId).filter((id): id is string => Boolean(id)));
+  const orchestratingParents = tryAgentsQuery(db, ORCHESTRATING_PARENT_SQL, true) ?? [];
+  for (const parent of orchestratingParents) {
+    if (parent.threadId && !seenThreadIds.has(parent.threadId)) {
+      seenThreadIds.add(parent.threadId);
+      threadAgents.push(parent);
+    }
+  }
   let extraAgents = usedRuns
     ? tryAgentsQuery(db, SUBAGENT_RUNS_FULL_SQL, false)
     : tryAgentsQuery(db, SUBAGENT_NODES_FULL_SQL, false);
   if (extraAgents === null) {
     const extraCount = (usedRuns ? tryCountQuery(db, SUBAGENT_RUNS_SQL) : tryCountQuery(db, SUBAGENT_SQL)) ?? 0;
-    extraAgents = Array.from({ length: extraCount }, () => ({ model: null, instanceId: null }));
+    extraAgents = Array.from({ length: extraCount }, () => ({ threadId: null, model: null, instanceId: null }));
   }
-  const workingAgentModels = [...threadAgents, ...extraAgents];
+  const workingAgentModels: T3WorkingAgent[] = [...threadAgents, ...extraAgents].map((entry) => ({
+    model: entry.model,
+    instanceId: entry.instanceId,
+    ...(focusedThreadId && entry.threadId === focusedThreadId ? { isFocused: true } : {})
+  }));
   return {
     model,
     effort,
     instanceId,
     workingAgents: workingAgentModels.length,
     ...(workingAgentModels.length > 0 ? { workingAgentModels } : {}),
-    threadId: asText(row?.thread_id),
+    threadId: focusedThreadId,
     seenAtMs: Number.isFinite(seenAtMs) ? seenAtMs : 0
   };
 }
@@ -1055,7 +1097,7 @@ export function readT3Presence(): T3PresenceSnapshot | null {
   const instanceId = selection ? selection.instanceId : database?.instanceId ?? null;
   const workingAgents = database?.workingAgents ?? 0;
   const workingAgentModels = database?.workingAgentModels;
-  const agentsKey = workingAgentModels?.map((agent) => `${agent.instanceId || ''}:${agent.model || ''}`).join(',') || '';
+  const agentsKey = workingAgentModels?.map((agent) => `${agent.isFocused ? '*' : ''}${agent.instanceId || ''}:${agent.model || ''}`).join(',') || '';
   const cacheKey = `${source}\t${model}\t${effort || ''}\t${instanceId}\t${workingAgents}\t${agentsKey}`;
   if (presenceCache && presenceCache.key === cacheKey) {
     return presenceCache.snapshot;

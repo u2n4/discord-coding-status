@@ -268,3 +268,43 @@ test('Claude Desktop runners started by its utility helper still name the model'
   // A helper of another Desktop instance is not this one's.
   assert.equal(readDesktopHostedClaudeModel(desktopPid, [desktop, { ...helper, ppid: 99 }, runner]), null);
 });
+
+test('cleanupStateSessions keeps long-running skipToolHooks sessions alive while local transcript stays fresh', () => {
+  const { cleanupStateSessions } = require('../dist/state-store');
+  const now = Date.now();
+  const staleHookAt = now - 25 * 60 * 1000; // older than 15m STATE_MAX_AGE_MS
+  const freshTranscript = path.join(root, 'long-turn-fresh.jsonl');
+  const staleTranscript = path.join(root, 'long-turn-stale.jsonl');
+  writeLines(freshTranscript, [{ type: 'assistant', message: { model: 'claude-opus-5-5' } }], now - 60_000);
+  writeLines(staleTranscript, [{ type: 'assistant', message: { model: 'claude-opus-5-5' } }], staleHookAt);
+
+  const cleaned = cleanupStateSessions({
+    version: 1,
+    sessions: {
+      fresh: {
+        tool: 'claude',
+        surface: 'cli',
+        status: 'thinking',
+        session_id: 'fresh',
+        cwd: root,
+        updated_at: staleHookAt,
+        transcript_path: freshTranscript,
+        model: 'claude-opus-5-5'
+      },
+      expired: {
+        tool: 'claude',
+        surface: 'cli',
+        status: 'thinking',
+        session_id: 'expired',
+        cwd: root,
+        updated_at: staleHookAt,
+        transcript_path: staleTranscript,
+        model: 'claude-opus-5-5'
+      }
+    }
+  }, now);
+
+  assert.ok(cleaned.sessions.fresh, 'session with active transcript mtime must survive 15m TTL');
+  assert.equal(cleaned.sessions.fresh.updated_at, staleHookAt, 'hook updated_at stays unchanged so live transcript refresh still sees newer writes');
+  assert.equal(cleaned.sessions.expired, undefined, 'session with stale transcript must still expire');
+});

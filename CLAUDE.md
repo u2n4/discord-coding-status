@@ -11,8 +11,10 @@ Discord shows ONLY:
 Playing <App>                      <- Discord application identity per tool
 Model: <app label> [(Effort)]      <- details line, or absent when model is unknown;
                                       Effort shown ONLY for XHigh, Max, or Ultracode
-N agents · <model summary>         <- T3 Code only, Discord state, and only when N >= 3
-                                      (falls back to `N agents` when no agent model is proven)
+N agents · <other models>          <- T3 Code only, Discord state, and only when N >= 3
+                                      (omits the focused main thread shown on top; merges
+                                      identical model IDs across providers; falls back to
+                                      `N agents` when no other agent model is proven)
 ```
 
 Never sent: `startTimestamp`, activity, status, project, branch, package,

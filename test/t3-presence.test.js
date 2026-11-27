@@ -413,7 +413,7 @@ test('fewer than 3 working T3 agents stay hidden, and 3 or more show count and m
   assert.equal(buildPresence(shown).state, '3 agents · 2x Grok 4.7');
 });
 
-test('3+ working T3 agents across mixed models list each model with grouping and focused-model priority', { skip: !hasSqlite && 'node:sqlite unavailable' }, async () => {
+test('3+ working T3 agents exclude focused main model from bottom line, keep orchestrating parent active, and ignore subagent threads for top Model:', { skip: !hasSqlite && 'node:sqlite unavailable' }, async () => {
   writeModelLists();
   const { db } = useDatabase('mixed-agents');
   db.exec(`
@@ -426,6 +426,7 @@ test('3+ working T3 agents across mixed models list each model with grouping and
       payload_json TEXT
     );
     CREATE TABLE orchestration_v2_projection_subagents (
+      thread_id TEXT,
       status TEXT,
       child_thread_id TEXT,
       provider TEXT,
@@ -440,49 +441,73 @@ test('3+ working T3 agents across mixed models list each model with grouping and
     lastVisitedAt: '2026-06-02T00:00:00.000Z',
     updatedAt: '2026-06-02T00:00:00.000Z'
   });
-  addThread(db, {
-    id: 'child-1',
-    instanceId: 'codex',
-    model: 'gpt-6.2-sol',
-    updatedAt: '2026-06-02T00:00:00.000Z'
-  });
-  addThread(db, {
-    id: 'child-2',
-    instanceId: 'claudeAgent',
-    model: 'claude-opus-5-5',
-    updatedAt: '2026-06-02T00:00:00.000Z'
-  });
+  // Delegated subagent threads have newer lastVisitedAt & subagent lineage; they must NEVER hijack the top Model: line!
+  db.prepare(`
+    INSERT INTO orchestration_v2_projection_threads (thread_id, payload_json, deleted_at, archived_at, updated_at)
+    VALUES (?, ?, NULL, NULL, ?)
+  `).run(
+    'thread:delegated-task:child-1',
+    JSON.stringify({
+      modelSelection: { instanceId: 'antigravity', model: 'claude-opus-5-5' },
+      lastVisitedAt: '2026-06-02T00:05:00.000Z',
+      lineage: { parentThreadId: 'main', relationshipToParent: 'subagent', rootThreadId: 'main' }
+    }),
+    '2026-06-02T00:05:00.000Z'
+  );
+  db.prepare(`
+    INSERT INTO orchestration_v2_projection_threads (thread_id, payload_json, deleted_at, archived_at, updated_at)
+    VALUES (?, ?, NULL, NULL, ?)
+  `).run(
+    'thread:delegated-task:child-2',
+    JSON.stringify({
+      modelSelection: { instanceId: 'claudeAgent', model: 'claude-opus-5-5' },
+      lastVisitedAt: '2026-06-02T00:06:00.000Z',
+      lineage: { parentThreadId: 'main', relationshipToParent: 'subagent', rootThreadId: 'main' }
+    }),
+    '2026-06-02T00:06:00.000Z'
+  );
+  // Main thread's own run is completed (waiting for children), while its 2 subagents are running!
   db.prepare(`
     INSERT INTO orchestration_v2_projection_runs (thread_id, ordinal, provider, provider_instance_id, status, payload_json)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run('main', 1, 'antigravity', 'antigravity', 'running', JSON.stringify({ modelSelection: { instanceId: 'antigravity', model: 'gemini-4-neon' } }));
+  `).run('main', 1, 'antigravity', 'antigravity', 'completed', JSON.stringify({ modelSelection: { instanceId: 'antigravity', model: 'gemini-4-neon' } }));
   db.prepare(`
     INSERT INTO orchestration_v2_projection_runs (thread_id, ordinal, provider, provider_instance_id, status, payload_json)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run('child-1', 1, 'codex', 'codex', 'running', JSON.stringify({ modelSelection: { instanceId: 'codex', model: 'gpt-6.2-sol' } }));
+  `).run('thread:delegated-task:child-1', 1, 'antigravity', 'antigravity', 'running', JSON.stringify({ modelSelection: { instanceId: 'antigravity', model: 'claude-opus-5-5' } }));
   db.prepare(`
     INSERT INTO orchestration_v2_projection_runs (thread_id, ordinal, provider, provider_instance_id, status, payload_json)
     VALUES (?, ?, ?, ?, ?, ?)
-  `).run('child-2', 1, 'claudeAgent', 'claudeAgent', 'running', JSON.stringify({ modelSelection: { instanceId: 'claudeAgent', model: 'claude-opus-5-5' } }));
+  `).run('thread:delegated-task:child-2', 1, 'claudeAgent', 'claudeAgent', 'running', JSON.stringify({ modelSelection: { instanceId: 'claudeAgent', model: 'claude-opus-5-5' } }));
+  db.prepare(`
+    INSERT INTO orchestration_v2_projection_subagents (thread_id, status, child_thread_id, provider, provider_instance_id, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('main', 'running', 'thread:delegated-task:child-1', 'antigravity', 'antigravity', JSON.stringify({ modelSelection: { instanceId: 'antigravity', model: 'claude-opus-5-5' } }));
+  db.prepare(`
+    INSERT INTO orchestration_v2_projection_subagents (thread_id, status, child_thread_id, provider, provider_instance_id, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('main', 'running', 'thread:delegated-task:child-2', 'claudeAgent', 'claudeAgent', JSON.stringify({ modelSelection: { instanceId: 'claudeAgent', model: 'claude-opus-5-5' } }));
   db.close();
 
   resetT3ModelCacheForTests();
-  const threeMixed = await enrichToolForPresence(t3Tool());
-  assert.equal(threeMixed.details, 'Model: Gemini 4 Neon');
-  assert.equal(threeMixed.state, '3 agents · Gemini 4 Neon, GPT-6.2 Sol, Opus 5.5');
+  const threeOrchestrated = await enrichToolForPresence(t3Tool());
+  // Top line stays Gemini 4 Neon (subagent threads ignored); bottom line counts 3 (main + 2 children),
+  // excludes main Gemini 4 Neon, and merges claude-opus-5-5 across antigravity + claudeAgent into 2x Opus 5.5!
+  assert.equal(threeOrchestrated.details, 'Model: Gemini 4 Neon');
+  assert.equal(threeOrchestrated.state, '3 agents · 2x Opus 5.5');
 
-  // Add an unthreaded Codex subagent so GPT-6.2 Sol becomes 2x (higher count sorts first)
+  // Add a Codex unthreaded subagent so count becomes 4 with GPT-6.2 Sol + 2x Opus 5.5
   const { DatabaseSync } = require('node:sqlite');
   const db2 = new DatabaseSync(process.env.DISCORD_CODING_STATUS_T3_STATE_DB);
   db2.prepare(`
-    INSERT INTO orchestration_v2_projection_subagents (status, child_thread_id, provider, provider_instance_id, payload_json)
-    VALUES (?, ?, ?, ?, ?)
-  `).run('running', null, 'codex', 'codex', JSON.stringify({ modelSelection: { instanceId: 'codex', model: 'gpt-6.2-sol' } }));
+    INSERT INTO orchestration_v2_projection_subagents (thread_id, status, child_thread_id, provider, provider_instance_id, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('main', 'running', null, 'codex', 'codex', JSON.stringify({ modelSelection: { instanceId: 'codex', model: 'gpt-6.2-sol' } }));
   db2.close();
 
   resetT3ModelCacheForTests();
   const fourGrouped = await enrichToolForPresence(t3Tool());
-  assert.equal(fourGrouped.state, '4 agents · 2x GPT-6.2 Sol, Gemini 4 Neon, Opus 5.5');
+  assert.equal(fourGrouped.state, '4 agents · 2x Opus 5.5, GPT-6.2 Sol');
 });
 
 test('a T3 model still shows when the subagent table is missing', { skip: !hasSqlite && 'node:sqlite unavailable' }, async () => {
