@@ -11,6 +11,7 @@ const test = require('node:test');
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'discord-coding-status-attribution-'));
 process.env.XDG_DATA_HOME = path.join(scratch, 'xdg');
+process.env.DISCORD_CODING_STATUS_MUSE_SETTINGS_FILE = path.join(scratch, 'muse-settings.json');
 process.env.CODEX_HOME = path.join(scratch, 'codex-home');
 process.env.DISCORD_CODING_STATUS_STATE_MAX_AGE_MS = '900000';
 

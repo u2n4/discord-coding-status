@@ -8,6 +8,7 @@ import { envPathValue, resolveHomePath } from './commands/config/settings';
 import { getArgString } from './commands/args';
 import { readHookInput, sleepSync } from './state-store';
 import {
+  extractAntigravityEffort,
   getAntigravityCliHomeDir,
   normalizeAntigravityModel,
   readActiveAntigravityModel,
@@ -412,8 +413,16 @@ export function antigravityHookSessionFromArgs(
   const rawModel = getArgString(args, 'model')
     || (typeof input.modelName === 'string' ? input.modelName : '')
     || (typeof input.model === 'string' ? input.model : '');
+  const resolvedFallback = fromCli ? readAntigravityCliModel() : readActiveAntigravityModel(transcriptPath);
   const model = normalizeAntigravityModel(rawModel)
-    || (fromCli ? readAntigravityCliModel()?.model : readActiveAntigravityModel(transcriptPath)?.model)
+    || resolvedFallback?.model
+    || undefined;
+  const rawEffort = getArgString(args, 'effort')
+    || (typeof input.effort === 'string' ? input.effort : '')
+    || (typeof input.thoughtLevel === 'string' ? input.thoughtLevel : '')
+    || (typeof input.thought_level === 'string' ? input.thought_level : '')
+    || extractAntigravityEffort(rawModel)
+    || resolvedFallback?.effort
     || undefined;
 
   const now = Date.now();
@@ -425,6 +434,7 @@ export function antigravityHookSessionFromArgs(
     status,
     activity,
     ...(model ? { model } : {}),
+    ...(rawEffort ? { effort: rawEffort } : {}),
     started_at: now,
     updated_at: now
   };

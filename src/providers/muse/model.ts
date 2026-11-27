@@ -754,9 +754,57 @@ export function getMuseSettingsFilePath(): string {
   return path.join(xdgConfig, 'muse', 'settings.json');
 }
 
-const museSettingsCache = new Map<string, { mtimeMs: number; model: string | null }>();
+const museSettingsCache = new Map<string, {
+  mtimeMs: number;
+  model: string | null;
+  effort: string | null;
+  modelEfforts: Record<string, string>;
+}>();
 
-export function readMuseSettingsModel(): MuseSettingsModelResult | null {
+function parseMuseSettings(filePath: string, mtimeMs: number): {
+  mtimeMs: number;
+  model: string | null;
+  effort: string | null;
+  modelEfforts: Record<string, string>;
+} | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (_) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    const empty = { mtimeMs, model: null, effort: null, modelEfforts: {} };
+    museSettingsCache.set(filePath, empty);
+    return empty;
+  }
+  const record = parsed as Record<string, unknown>;
+  const raw = typeof record.model === 'string' ? record.model.trim() : '';
+  const model = raw && raw.toLowerCase() !== 'unknown' && raw.toLowerCase() !== 'same-as-main' ? raw : null;
+  const rawEffort = typeof record.reasoning_effort === 'string'
+    ? record.reasoning_effort.trim()
+    : (typeof record.effort === 'string' ? record.effort.trim() : '');
+  const effort = rawEffort || null;
+  const modelEfforts: Record<string, string> = {};
+  if (record.model_reasoning_efforts && typeof record.model_reasoning_efforts === 'object' && !Array.isArray(record.model_reasoning_efforts)) {
+    for (const [k, v] of Object.entries(record.model_reasoning_efforts as Record<string, unknown>)) {
+      if (typeof v === 'string' && v.trim()) {
+        modelEfforts[k.trim()] = v.trim();
+      }
+    }
+  }
+  const entry = { mtimeMs, model, effort, modelEfforts };
+  museSettingsCache.set(filePath, entry);
+  return entry;
+}
+
+function loadMuseSettingsCached(): {
+  filePath: string;
+  mtimeMs: number;
+  model: string | null;
+  effort: string | null;
+  modelEfforts: Record<string, string>;
+} | null {
   const filePath = getMuseSettingsFilePath();
   let stat: fs.Stats;
   try {
@@ -768,35 +816,33 @@ export function readMuseSettingsModel(): MuseSettingsModelResult | null {
   if (!stat.isFile()) {
     return null;
   }
-
   const cached = museSettingsCache.get(filePath);
   if (cached && cached.mtimeMs === stat.mtimeMs) {
-    return cached.model ? { model: cached.model, filePath, mtimeMs: stat.mtimeMs } : null;
+    return { filePath, ...cached };
   }
+  const parsed = parseMuseSettings(filePath, stat.mtimeMs);
+  return parsed ? { filePath, ...parsed } : null;
+}
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch (_) {
+export function readMuseSettingsModel(): MuseSettingsModelResult | null {
+  const loaded = loadMuseSettingsCached();
+  return loaded?.model
+    ? { model: loaded.model, filePath: loaded.filePath, mtimeMs: loaded.mtimeMs }
+    : null;
+}
+
+// Reads the persisted reasoning effort for an ALREADY-PROVEN Muse model
+// (`model_reasoning_efforts[model]` first, then top-level `reasoning_effort`).
+// Never used to guess the model itself.
+export function readMuseSettingsEffort(modelId?: string | null): string | null {
+  const loaded = loadMuseSettingsCached();
+  if (!loaded) {
     return null;
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    museSettingsCache.set(filePath, { mtimeMs: stat.mtimeMs, model: null });
-    return null;
+  const key = typeof modelId === 'string' ? modelId.trim() : '';
+  if (key && loaded.modelEfforts[key]) {
+    return loaded.modelEfforts[key];
   }
-
-  const record = parsed as Record<string, unknown>;
-  const raw = typeof record.model === 'string' ? record.model.trim() : '';
-  if (!raw || raw.toLowerCase() === 'unknown' || raw.toLowerCase() === 'same-as-main') {
-    museSettingsCache.set(filePath, { mtimeMs: stat.mtimeMs, model: null });
-    return null;
-  }
-
-  museSettingsCache.set(filePath, { mtimeMs: stat.mtimeMs, model: raw });
-  return {
-    model: raw,
-    filePath,
-    mtimeMs: stat.mtimeMs
-  };
+  return loaded.effort;
 }
 

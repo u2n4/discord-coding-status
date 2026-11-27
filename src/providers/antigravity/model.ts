@@ -8,8 +8,25 @@ import { readAntigravityLiveLabel } from './live-labels';
 
 export interface AntigravityModelResult {
   model: string;
+  effort?: string | null;
   filePath: string;
   mtimeMs: number;
+}
+
+export function extractAntigravityEffort(raw: unknown): string | null {
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const paren = trimmed.match(/\(([^()]{1,24})\)\s*$/);
+  if (paren?.[1]?.trim()) {
+    return paren[1].trim();
+  }
+  const slug = trimmed.match(/-(ultracode|xhigh)(?:-(?:fast|thinking))?$/i);
+  return slug?.[1] ? slug[1].toLowerCase() : null;
 }
 
 export function getAntigravityHomeDir(): string {
@@ -352,8 +369,10 @@ export function readAntigravityStateModel(): AntigravityModelResult | null {
     if (!model) {
       return null;
     }
+    const effort = extractAntigravityEffort(model);
     return {
       model,
+      ...(effort ? { effort } : {}),
       filePath,
       mtimeMs: stat.mtimeMs
     };
@@ -421,16 +440,28 @@ export function readAntigravityCliModel(): AntigravityModelResult | null {
   try {
     const model = readAgyLogModel(logFile);
     if (model) {
-      return { model, filePath: logFile, mtimeMs: fs.statSync(logFile).mtimeMs };
+      const effort = extractAntigravityEffort(model);
+      return { model, ...(effort ? { effort } : {}), filePath: logFile, mtimeMs: fs.statSync(logFile).mtimeMs };
     }
   } catch (_) {
     // No log yet: fall back to the persisted pick.
   }
   const settingsFile = path.join(home, 'settings.json');
   try {
-    const parsed = JSON.parse(fs.readFileSync(settingsFile, 'utf8')) as { model?: unknown };
+    const parsed = JSON.parse(fs.readFileSync(settingsFile, 'utf8')) as {
+      model?: unknown;
+      effort?: unknown;
+      thoughtLevel?: unknown;
+      thought_level?: unknown;
+      reasoningEffort?: unknown;
+    };
     const model = typeof parsed.model === 'string' ? parsed.model.trim() : '';
-    return model ? { model, filePath: settingsFile, mtimeMs: fs.statSync(settingsFile).mtimeMs } : null;
+    const rawEffort = parsed.effort ?? parsed.thoughtLevel ?? parsed.thought_level ?? parsed.reasoningEffort;
+    const effort = (typeof rawEffort === 'string' && rawEffort.trim() ? rawEffort.trim() : null)
+      || extractAntigravityEffort(model);
+    return model
+      ? { model, ...(effort ? { effort } : {}), filePath: settingsFile, mtimeMs: fs.statSync(settingsFile).mtimeMs }
+      : null;
   } catch (_) {
     return null;
   }

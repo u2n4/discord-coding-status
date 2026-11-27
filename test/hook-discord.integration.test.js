@@ -133,7 +133,7 @@ test('hook changes update and clear Discord Rich Presence without waiting for po
   assert.equal(daemon.output().stderr, '');
 });
 
-test('Codex hook shows the raw model without reasoning effort', async (t) => {
+test('Codex hook shows XHigh effort alongside the model and hides lower efforts', async (t) => {
   const { directory, env, rpcLogFile } = createTestEnvironment(t);
   const transcriptPath = path.join(directory, 'codex-session.jsonl');
   fs.writeFileSync(transcriptPath, `${JSON.stringify({
@@ -167,12 +167,11 @@ test('Codex hook shows the raw model without reasoning effort', async (t) => {
   const activity = await waitFor(
     () => readRpcEvents(rpcLogFile).find(
       (event) => event.method === 'setActivity'
-        && event.activity.details === 'Model: GPT-5.6-Sol'
+        && event.activity.details === 'Model: GPT-5.6-Sol (XHigh)'
     ),
-    'the raw model to reach Discord RPC'
+    'the model with XHigh effort to reach Discord RPC'
   );
-  assert.equal(activity.activity.details, 'Model: GPT-5.6-Sol');
-  assert.doesNotMatch(JSON.stringify(activity.activity), /xhigh/);
+  assert.equal(activity.activity.details, 'Model: GPT-5.6-Sol (XHigh)');
 
   const stateResult = await runCli(['state'], env);
   const state = JSON.parse(stateResult.stdout);
@@ -208,7 +207,7 @@ test('display toggles cannot enable extra blocks', async (t) => {
     '--project', 'display-project',
     '--package', 'display-package',
     '--model', 'gpt-minimal',
-    '--effort', 'xhigh',
+    '--effort', 'high',
     '--context', '42%'
   ], env);
 
@@ -224,7 +223,7 @@ test('display toggles cannot enable extra blocks', async (t) => {
   assert.equal(event.activity.startTimestamp, undefined);
   assert.doesNotMatch(
     JSON.stringify(event.activity),
-    /This activity must be hidden|display-project|display-package|42%|xhigh/
+    /This activity must be hidden|display-project|display-package|42%|high/i
   );
   assert.equal(daemon.output().stderr, '');
 });

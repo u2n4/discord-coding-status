@@ -6,10 +6,19 @@ import * as path from 'node:path';
 
 export interface CodexConfiguredModel {
   model: string;
+  effort?: string | null;
   mtimeMs: number;
+  effortChangedAtMs?: number;
   filePath: string;
   /** When this process saw the model value itself change (0 = never seen changing). */
   observedChangeAtMs: number;
+  /** When this process saw the effort value itself change (0 = never seen changing). */
+  observedEffortChangeAtMs?: number;
+}
+
+export interface CodexParsedSelection {
+  model: string | null;
+  effort: string | null;
 }
 
 export function getCodexHomeDirectory(): string {
@@ -28,7 +37,9 @@ export function getCodexGlobalStateFilePath(): string {
   return path.join(getCodexHomeDirectory(), '.codex-global-state.json');
 }
 
-export function parseCodexConfigTomlModel(content: string): string | null {
+export function parseCodexConfigToml(content: string): CodexParsedSelection {
+  let model: string | null = null;
+  let effort: string | null = null;
   const lines = content.split(/\r?\n/);
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -39,35 +50,77 @@ export function parseCodexConfigTomlModel(content: string): string | null {
       // Top-level keys in TOML appear before the first table header.
       break;
     }
-    const match = line.match(/^model\s*=\s*(?:"([^"]+)"|'([^']+)')/);
-    if (match) {
-      const value = (match[1] ?? match[2] ?? '').trim();
-      return value || null;
+    if (model === null) {
+      const modelMatch = line.match(/^model\s*=\s*(?:"([^"]+)"|'([^']+)')/);
+      if (modelMatch) {
+        const value = (modelMatch[1] ?? modelMatch[2] ?? '').trim();
+        if (value) {
+          model = value;
+        }
+      }
+    }
+    if (effort === null) {
+      const effortMatch = line.match(/^model_reasoning_effort\s*=\s*(?:"([^"]+)"|'([^']+)')/);
+      if (effortMatch) {
+        const value = (effortMatch[1] ?? effortMatch[2] ?? '').trim();
+        if (value) {
+          effort = value;
+        }
+      }
     }
   }
-  return null;
+  return { model, effort };
 }
 
-export function parseCodexGlobalStateModel(content: string): string | null {
-  const recentMatch = content.match(
-    /"composer-recent-model-configurations-v1"\s*:\s*\[\s*\{[^}\]]*?"model"\s*:\s*"([^"]+)"/
-  );
-  if (recentMatch?.[1]?.trim()) {
-    return recentMatch[1].trim();
-  }
+export function parseCodexConfigTomlModel(content: string): string | null {
+  return parseCodexConfigToml(content).model;
+}
 
+function readRecentConfigEntry(container: unknown): CodexParsedSelection | null {
+  if (!container || typeof container !== 'object' || Array.isArray(container)) {
+    return null;
+  }
+  const recent = (container as Record<string, unknown>)['composer-recent-model-configurations-v1'];
+  if (!Array.isArray(recent) || recent.length === 0) {
+    return null;
+  }
+  const first = recent[0];
+  if (!first || typeof first !== 'object' || Array.isArray(first)) {
+    return null;
+  }
+  const record = first as Record<string, unknown>;
+  const model = typeof record.model === 'string' && record.model.trim() ? record.model.trim() : null;
+  const effort = typeof record.reasoningEffort === 'string' && record.reasoningEffort.trim()
+    ? record.reasoningEffort.trim()
+    : (typeof record.reasoning_effort === 'string' && record.reasoning_effort.trim()
+      ? record.reasoning_effort.trim()
+      : (typeof record.effort === 'string' && record.effort.trim() ? record.effort.trim() : null));
+  return model ? { model, effort } : null;
+}
+
+export function parseCodexGlobalState(content: string): CodexParsedSelection {
   try {
     const parsed = JSON.parse(content) as Record<string, unknown>;
-    const atomState = parsed?.['electron-persisted-atom-state'];
-    if (atomState && typeof atomState === 'object' && !Array.isArray(atomState)) {
-      const recent = (atomState as Record<string, unknown>)['composer-recent-model-configurations-v1'];
-      if (Array.isArray(recent) && recent.length > 0) {
-        const first = recent[0];
-        if (first && typeof first === 'object' && !Array.isArray(first)) {
-          const model = (first as Record<string, unknown>).model;
-          if (typeof model === 'string' && model.trim()) {
-            return model.trim();
-          }
+    // Prefer the active account's owner-scoped atoms (current Codex Desktop),
+    // then legacy electron-persisted-atom-state, then any owner atom block.
+    const activeOwner = typeof parsed?.['electron-renderer-content-owner'] === 'string'
+      ? parsed['electron-renderer-content-owner'].trim()
+      : '';
+    if (activeOwner) {
+      const owned = readRecentConfigEntry(parsed[`electron-owner-atoms:${activeOwner}`]);
+      if (owned) {
+        return owned;
+      }
+    }
+    const persisted = readRecentConfigEntry(parsed?.['electron-persisted-atom-state']);
+    if (persisted) {
+      return persisted;
+    }
+    for (const [key, value] of Object.entries(parsed || {})) {
+      if (key.startsWith('electron-owner-atoms:')) {
+        const entry = readRecentConfigEntry(value);
+        if (entry) {
+          return entry;
         }
       }
     }
@@ -75,28 +128,53 @@ export function parseCodexGlobalStateModel(content: string): string | null {
     if (workspaceState && typeof workspaceState === 'object' && !Array.isArray(workspaceState)) {
       const wsRecord = workspaceState as Record<string, unknown>;
       const model = wsRecord.model || wsRecord.defaultModel;
+      const effort = wsRecord.reasoningEffort || wsRecord.reasoning_effort || wsRecord.effort;
       if (typeof model === 'string' && model.trim()) {
-        return model.trim();
+        return {
+          model: model.trim(),
+          effort: typeof effort === 'string' && effort.trim() ? effort.trim() : null
+        };
       }
     }
   } catch (_) {
-    return null;
+    // Fall through to lightweight regex fallback for partially written JSON.
   }
-  return null;
+
+  const blockMatch = content.match(
+    /"composer-recent-model-configurations-v1"\s*:\s*\[\s*(\{[^}\]]*\})/
+  );
+  if (blockMatch?.[1]) {
+    const modelMatch = blockMatch[1].match(/"model"\s*:\s*"([^"]+)"/);
+    const effortMatch = blockMatch[1].match(/"(?:reasoningEffort|reasoning_effort|effort)"\s*:\s*"([^"]+)"/);
+    if (modelMatch?.[1]?.trim()) {
+      return {
+        model: modelMatch[1].trim(),
+        effort: effortMatch?.[1]?.trim() || null
+      };
+    }
+  }
+  return { model: null, effort: null };
+}
+
+export function parseCodexGlobalStateModel(content: string): string | null {
+  return parseCodexGlobalState(content).model;
 }
 
 interface CachedCodexModelEntry {
   statMtimeMs: number;
   model: string | null;
+  effort: string | null;
   modelChangedAtMs: number;
+  effortChangedAtMs: number;
   observedChangeAtMs: number;
+  observedEffortChangeAtMs: number;
 }
 
 const codexModelCache = new Map<string, CachedCodexModelEntry>();
 
 function readCachedCodexModelFile(
   filePath: string,
-  parser: (content: string) => string | null
+  parser: (content: string) => CodexParsedSelection
 ): CodexConfiguredModel | null {
   try {
     if (!fs.existsSync(filePath)) {
@@ -110,34 +188,60 @@ function readCachedCodexModelFile(
     const prev = codexModelCache.get(filePath);
     if (prev && prev.statMtimeMs === stat.mtimeMs) {
       return prev.model
-        ? { model: prev.model, mtimeMs: prev.modelChangedAtMs, filePath, observedChangeAtMs: prev.observedChangeAtMs }
+        ? {
+          model: prev.model,
+          effort: prev.effort,
+          mtimeMs: prev.modelChangedAtMs,
+          effortChangedAtMs: prev.effortChangedAtMs,
+          filePath,
+          observedChangeAtMs: prev.observedChangeAtMs,
+          observedEffortChangeAtMs: prev.observedEffortChangeAtMs
+        }
         : null;
     }
-    const model = parser(fs.readFileSync(filePath, 'utf8'));
+    const { model, effort } = parser(fs.readFileSync(filePath, 'utf8'));
     const modelChangedAtMs =
       prev && prev.model === model ? prev.modelChangedAtMs : stat.mtimeMs;
+    const effortChangedAtMs =
+      prev && prev.effort === effort ? prev.effortChangedAtMs : stat.mtimeMs;
     // Other config.toml writes (trust entries, MCP edits) move the mtime too,
-    // so only a value change seen between two reads counts as a /model switch.
+    // so only a value change seen between two reads counts as a /model or /effort switch.
     const observedChangeAtMs = prev
       ? (prev.model === model ? prev.observedChangeAtMs : stat.mtimeMs)
+      : 0;
+    const observedEffortChangeAtMs = prev
+      ? (prev.effort === effort ? prev.observedEffortChangeAtMs : stat.mtimeMs)
       : 0;
     codexModelCache.set(filePath, {
       statMtimeMs: stat.mtimeMs,
       model,
+      effort,
       modelChangedAtMs,
-      observedChangeAtMs
+      effortChangedAtMs,
+      observedChangeAtMs,
+      observedEffortChangeAtMs
     });
-    return model ? { model, mtimeMs: modelChangedAtMs, filePath, observedChangeAtMs } : null;
+    return model
+      ? {
+        model,
+        effort,
+        mtimeMs: modelChangedAtMs,
+        effortChangedAtMs,
+        filePath,
+        observedChangeAtMs,
+        observedEffortChangeAtMs
+      }
+      : null;
   } catch (_) {
     return null;
   }
 }
 
-// Codex CLI: the top-level `model` in config.toml is the persisted default
-// (`/model` writes it). The Desktop composer state is never consulted for the
-// CLI, because it records Desktop picks, not the CLI session.
+// Codex CLI: the top-level `model` and `model_reasoning_effort` in config.toml
+// are the persisted defaults (`/model` writes them). The Desktop composer state
+// is never consulted for the CLI, because it records Desktop picks, not the CLI session.
 export function readCodexConfiguredModel(): CodexConfiguredModel | null {
-  return readCachedCodexModelFile(getCodexConfigFilePath(), parseCodexConfigTomlModel);
+  return readCachedCodexModelFile(getCodexConfigFilePath(), parseCodexConfigToml);
 }
 
 // CommandLineToArgvW rules: quotes group, \" is a literal quote, and 2n
@@ -192,40 +296,62 @@ export function splitWindowsCommandLine(commandLine: string): string[] {
 }
 
 // Codex CLI launched with an explicit model (`codex --model gpt-6.2-astra`,
-// `-m x`, `-c model=x`) runs that model regardless of config.toml, so the
-// flag on the live process outranks the persisted default.
-export function parseCodexCommandLineModel(commandLine: string | null | undefined): string | null {
+// `-m x`, `-c model=x`) or effort (`-c model_reasoning_effort=xhigh`,
+// `--effort max`) runs those overrides regardless of config.toml.
+export function parseCodexCommandLine(commandLine: string | null | undefined): CodexParsedSelection {
   if (typeof commandLine !== 'string' || !commandLine.trim()) {
-    return null;
+    return { model: null, effort: null };
   }
   const tokens = splitWindowsCommandLine(commandLine);
   const unquote = (token: string | undefined) => (token || '').replace(/^(["'])(.*)\1$/, '$2').trim();
   let model: string | null = null;
+  let effort: string | null = null;
   for (let index = 1; index < tokens.length; index += 1) {
     const token = unquote(tokens[index]);
-    let value: string | null = null;
+    let modelValue: string | null = null;
+    let effortValue: string | null = null;
     if (token === '--model' || token === '-m') {
-      value = unquote(tokens[index + 1]);
+      modelValue = unquote(tokens[index + 1]);
       index += 1;
     } else if (token.startsWith('--model=')) {
-      value = token.slice('--model='.length);
-    } else if (token === '-c' || token === '--config') {
-      const override = unquote(tokens[index + 1]).match(/^model\s*=\s*(.+)$/);
+      modelValue = token.slice('--model='.length);
+    } else if (token === '--effort' || token === '--reasoning-effort') {
+      effortValue = unquote(tokens[index + 1]);
       index += 1;
-      value = override ? unquote(override[1]) : null;
+    } else if (token.startsWith('--effort=')) {
+      effortValue = token.slice('--effort='.length);
+    } else if (token.startsWith('--reasoning-effort=')) {
+      effortValue = token.slice('--reasoning-effort='.length);
+    } else if (token === '-c' || token === '--config') {
+      const next = unquote(tokens[index + 1]);
+      index += 1;
+      const modelOverride = next.match(/^model\s*=\s*(.+)$/);
+      const effortOverride = next.match(/^model_reasoning_effort\s*=\s*(.+)$/);
+      modelValue = modelOverride ? unquote(modelOverride[1]) : null;
+      effortValue = effortOverride ? unquote(effortOverride[1]) : null;
     } else if (token.startsWith('--config=')) {
-      const override = token.slice('--config='.length).match(/^model\s*=\s*(.+)$/);
-      value = override ? unquote(override[1]) : null;
+      const rest = token.slice('--config='.length);
+      const modelOverride = rest.match(/^model\s*=\s*(.+)$/);
+      const effortOverride = rest.match(/^model_reasoning_effort\s*=\s*(.+)$/);
+      modelValue = modelOverride ? unquote(modelOverride[1]) : null;
+      effortValue = effortOverride ? unquote(effortOverride[1]) : null;
     }
-    if (value && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,80}$/.test(value)) {
+    if (modelValue && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,80}$/.test(modelValue)) {
       // The last flag wins, as in Codex's own argument parsing.
-      model = value;
+      model = modelValue;
+    }
+    if (effortValue && /^[A-Za-z0-9][A-Za-z0-9._ -]{0,30}$/.test(effortValue)) {
+      effort = effortValue;
     }
   }
-  return model;
+  return { model, effort };
+}
+
+export function parseCodexCommandLineModel(commandLine: string | null | undefined): string | null {
+  return parseCodexCommandLine(commandLine).model;
 }
 
 // Codex Desktop: the most recent composer pick in .codex-global-state.json.
 export function readCodexDesktopModel(): CodexConfiguredModel | null {
-  return readCachedCodexModelFile(getCodexGlobalStateFilePath(), parseCodexGlobalStateModel);
+  return readCachedCodexModelFile(getCodexGlobalStateFilePath(), parseCodexGlobalState);
 }

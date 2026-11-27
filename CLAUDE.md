@@ -8,20 +8,23 @@ Originally based on https://github.com/howznguyen/discord-coding-status (v1.6.1,
 Discord shows ONLY:
 
 ```text
-Playing <App>          <- Discord application identity per tool
-Model: <app label>     <- details line, or absent when the model is unknown
-N agents               <- T3 Code only, Discord state, and only when N >= 5
+Playing <App>                      <- Discord application identity per tool
+Model: <app label> [(Effort)]      <- details line, or absent when model is unknown;
+                                      Effort shown ONLY for XHigh, Max, or Ultracode
+N agents                           <- T3 Code only, Discord state, and only when N >= 5
 ```
 
 Never sent: `startTimestamp`, activity, status, project, branch, package,
-quota, context, effort, emoji, session counts. The T3 agent line above is
-the only count, and it stays hidden below 5. `SHOW_*`, detail levels, and
-activity styles in config are inert. The model is resolved from evidence
-(never guessed), then shown the way the tool itself writes it (since
-2026-11-03): `src/providers/model-label.ts` maps a resolved id to the tool's
-own label, from the tool's model list where one exists (Codex and Grok
-`models_cache.json`, `agy models`, T3 `~/.t3/caches/*.json` plus
-`userdata/model-manifest.json`), effort brackets dropped: "Opus 5.5",
+quota, context, lower efforts (`none`/`minimal`/`low`/`medium`/`high`/`ultrathink`),
+emoji, session counts. The T3 agent line above is the only count, and it stays
+hidden below 5. Only the three highest reasoning tiers (`XHigh`, `Max`,
+`Ultracode`) appear in parentheses after the model label (`src/core/presence/effort.ts`).
+`SHOW_*`, detail levels, and activity styles in config are inert. The model is
+resolved from evidence (never guessed), then shown the way the tool itself
+writes it (since 2026-11-03): `src/providers/model-label.ts` maps a resolved id
+to the tool's own label, from the tool's model list where one exists (Codex and
+Grok `models_cache.json`, `agy models`, T3 `~/.t3/caches/*.json` plus
+`userdata/model-manifest.json`), with lower effort brackets dropped: "Opus 5.5",
 "GPT-6.1 Sol" (Codex Desktop) / "GPT-6.1-Sol" (Codex CLI), "Gemini 4 Argon",
 "Grok 4.7", "Muse Spark 1.3". A model only T3 knows uses T3's own picker
 name. An id with no known label is shown unchanged; unknown model =

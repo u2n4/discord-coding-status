@@ -14,6 +14,7 @@ import type { ProcessInfo } from '../../core/tools/types';
 export interface ClaudeDesktopSession {
   sessionId: string;
   model: string | null;
+  effort?: string | null;
   focusedAtMs: number;
   usedAtMs: number;
 }
@@ -115,9 +116,21 @@ function parseSession(file: string): ClaudeDesktopSession | null {
   const sessionId = typeof record.cliSessionId === 'string' ? record.cliSessionId.trim() : '';
   const model = typeof record.model === 'string' ? record.model.trim() : '';
   const validModel = /^[A-Za-z0-9][A-Za-z0-9._:@\[\]-]{0,80}$/.test(model) && model !== 'default';
+  const sessionSettings = record.sessionSettings && typeof record.sessionSettings === 'object'
+    ? record.sessionSettings as { ultracode?: unknown }
+    : null;
+  const rawEffort = sessionSettings?.ultracode === true
+    ? 'ultracode'
+    : (typeof record.effort === 'string' && record.effort.trim() ? record.effort.trim() : null);
   const focusedAtMs = Number(record.lastFocusedAt) || 0;
   const usedAtMs = Math.max(focusedAtMs, Number(record.latestUserFrameAt) || 0);
-  return { sessionId, model: validModel ? model : null, focusedAtMs, usedAtMs };
+  return {
+    sessionId,
+    model: validModel ? model : null,
+    ...(rawEffort ? { effort: rawEffort } : {}),
+    focusedAtMs,
+    usedAtMs
+  };
 }
 
 function newestUsed(sessions: ClaudeDesktopSession[]): ClaudeDesktopSession {
@@ -150,7 +163,11 @@ function pickSession(sessions: ClaudeDesktopSession[], unreadableMtimeMs: number
     rivals.push(newestUsed(opened));
   }
   const agreed = rivals.every((session) => session === latest || (session.model !== null && session.model === latest.model));
-  return agreed ? latest : UNKNOWN_SESSION;
+  if (!agreed) {
+    return UNKNOWN_SESSION;
+  }
+  const effortAgreed = rivals.every((session) => session === latest || (session.effort || null) === (latest.effort || null));
+  return effortAgreed ? latest : { ...latest, effort: null };
 }
 
 /**

@@ -6,6 +6,9 @@ import * as path from 'node:path';
 import { getCodexHomeDirectory } from './codex/model';
 import { getGrokHomeDirectory } from './grok/model';
 import { lookupT3ModelName, resetT3ModelCacheForTests } from './t3/model';
+import { displayEffortLabel, type VisibleEffortLabel } from '../core/presence/effort';
+
+export { displayEffortLabel, type VisibleEffortLabel };
 
 // Turns a resolved model id into the label the tool itself shows, so Discord
 // reads the same as the model picker the user just used. Each tool's own
@@ -16,8 +19,48 @@ import { lookupT3ModelName, resetT3ModelCacheForTests } from './t3/model';
 const CLAUDE_ID = /^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:-[a-z0-9@-]+)?(?:\[[^\]]*\])?$/i;
 const GEMINI_ID = /^gemini-(\d+(?:\.\d+)?)-([a-z]+)(?:-[a-z0-9@.-]+)?$/i;
 const GPT_OSS_ID = /^gpt-oss-(\d+b)(?:-[a-z]+)?$/i;
-const EFFORT_SUFFIX = /\s*\((?:low|medium|high|max|xhigh|thinking)\)\s*$/i;
+const EFFORT_SUFFIX = /\s*\((?:minimal|low|medium|high|extra\s*high|extra|max|xhigh|x-high|thinking|ultracode|ultrathink)\)\s*$/i;
+const PAREN_EFFORT = /\(([^()]{1,24})\)\s*$/;
 const MUSE_ID = /^(?:meta\.)?muse-([a-z]+)-(\d+(?:\.\d+)?)(?:-[a-z]+)?$/i;
+
+export function extractEffortFromModelLabel(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const paren = trimmed.match(PAREN_EFFORT);
+  if (paren?.[1]) {
+    return paren[1].trim();
+  }
+  if (/(?:^|[-_])ultracode(?:$|[-_]fast$)/i.test(trimmed)) {
+    return 'ultracode';
+  }
+  if (/(?:^|[-_])xhigh(?:$|[-_]fast$)/i.test(trimmed)) {
+    return 'xhigh';
+  }
+  return null;
+}
+
+export function formatModelWithEffort(
+  surface: string | ModelLabelSurface | undefined,
+  model: string,
+  effort?: string | null
+): string {
+  const rawLabel = displayModelLabel(surface, model);
+  if (!rawLabel) {
+    return rawLabel;
+  }
+  const embedded = extractEffortFromModelLabel(model);
+  const hasExplicitEffort = typeof effort === 'string' && effort.trim().length > 0;
+  const visible = hasExplicitEffort ? displayEffortLabel(effort) : displayEffortLabel(embedded);
+  const base = embedded && EFFORT_SUFFIX.test(rawLabel)
+    ? rawLabel.replace(EFFORT_SUFFIX, '').trim()
+    : rawLabel;
+  return visible ? `${base} (${visible})` : base;
+}
 
 export interface ModelLabelSurface {
   family?: string;

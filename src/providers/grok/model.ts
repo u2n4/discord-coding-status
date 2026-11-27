@@ -6,6 +6,7 @@ import * as path from 'node:path';
 
 export interface GrokResolvedModel {
   model: string;
+  effort?: string | null;
   filePath: string;
   mtimeMs: number;
 }
@@ -23,7 +24,7 @@ export function getGrokConfigFilePath(): string {
 }
 
 const grokSummaryPathCache = new Map<string, string>();
-const grokFileModelCache = new Map<string, { mtimeMs: number; model: string | null }>();
+const grokFileModelCache = new Map<string, { mtimeMs: number; model: string | null; effort: string | null }>();
 
 export function findGrokSessionSummaryFile(sessionId: string, cwd?: string | null): string | null {
   const normalizedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
@@ -80,7 +81,9 @@ export function readGrokSessionSummaryModel(sessionId: string, cwd?: string | nu
     const stat = fs.statSync(summaryFile);
     const cached = grokFileModelCache.get(summaryFile);
     if (cached && cached.mtimeMs === stat.mtimeMs) {
-      return cached.model ? { model: cached.model, filePath: summaryFile, mtimeMs: stat.mtimeMs } : null;
+      return cached.model
+        ? { model: cached.model, ...(cached.effort ? { effort: cached.effort } : {}), filePath: summaryFile, mtimeMs: stat.mtimeMs }
+        : null;
     }
     const parsed = JSON.parse(fs.readFileSync(summaryFile, 'utf8')) as Record<string, unknown>;
     const info = parsed?.info;
@@ -88,20 +91,23 @@ export function readGrokSessionSummaryModel(sessionId: string, cwd?: string | nu
       ? (info as Record<string, unknown>).id
       : null;
     if (typeof recordedId === 'string' && recordedId.trim() !== sessionId.trim()) {
-      grokFileModelCache.set(summaryFile, { mtimeMs: stat.mtimeMs, model: null });
+      grokFileModelCache.set(summaryFile, { mtimeMs: stat.mtimeMs, model: null, effort: null });
       return null;
     }
     const model = parsed?.current_model_id;
+    const rawEffort = parsed?.reasoning_effort ?? parsed?.reasoningEffort ?? parsed?.effort;
+    const effort = typeof rawEffort === 'string' && rawEffort.trim() ? rawEffort.trim() : null;
     if (typeof model === 'string' && model.trim()) {
       const trimmed = model.trim();
-      grokFileModelCache.set(summaryFile, { mtimeMs: stat.mtimeMs, model: trimmed });
+      grokFileModelCache.set(summaryFile, { mtimeMs: stat.mtimeMs, model: trimmed, effort });
       return {
         model: trimmed,
+        ...(effort ? { effort } : {}),
         filePath: summaryFile,
         mtimeMs: stat.mtimeMs
       };
     }
-    grokFileModelCache.set(summaryFile, { mtimeMs: stat.mtimeMs, model: null });
+    grokFileModelCache.set(summaryFile, { mtimeMs: stat.mtimeMs, model: null, effort: null });
   } catch (_) {
     return null;
   }

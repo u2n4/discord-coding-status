@@ -40,6 +40,8 @@
 // button Name prefix and its FIRST text child are ever read; no conversation,
 // project, or general UI text is captured, copied, or logged.
 
+import { displayEffortLabel, type VisibleEffortLabel } from '../presence/effort';
+
 export const CLAUDE_DESKTOP_MODEL_BUTTON_PREFIX = 'Model:';
 export const CLAUDE_DESKTOP_CONTROL_TYPE_BUTTON = 'Button';
 export const CLAUDE_DESKTOP_CONTROL_TYPE_MENU = 'Menu';
@@ -87,6 +89,29 @@ export function parseClaudeDesktopModelChildLabel(
   }
 
   return label;
+}
+
+// Reads the effort suffix ONLY when the button's Name starts with
+// `Model: <firstChildLabel> <suffix>` and `<suffix>` is one of the three
+// visible effort tiers (Extra/XHigh, Max, Ultracode). Any mismatch or lower
+// tier fails closed to null.
+export function parseClaudeDesktopButtonEffort(
+  buttonName: unknown,
+  modelChildLabel: unknown
+): VisibleEffortLabel | null {
+  const model = parseClaudeDesktopModelChildLabel(buttonName, modelChildLabel);
+  if (!model || typeof buttonName !== 'string') {
+    return null;
+  }
+  const body = buttonName.trim().slice(CLAUDE_DESKTOP_MODEL_BUTTON_PREFIX.length).trim();
+  if (!body.toLowerCase().startsWith(model.toLowerCase())) {
+    return null;
+  }
+  const rest = body.slice(model.length).trim();
+  if (!rest) {
+    return null;
+  }
+  return displayEffortLabel(rest);
 }
 
 export function selectClaudeDesktopModel(

@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 export const CLAUDE_MANAGED_HOOK_MARKER = '--managed-by=discord-coding-status';
@@ -171,6 +172,134 @@ export function extractClaudeSessionId(hookInput: unknown): string | null {
 export function extractClaudeModelFromHookInput(hookInput: unknown): string | null {
   const input = asRecord(hookInput);
   return directModelFromRecord(input) ?? directModelFromRecord(asRecord(input?.metadata));
+}
+
+function directEffortFromRecord(record: JsonRecord | null): string | null {
+  if (!record) {
+    return null;
+  }
+  if (record.ultracode === true || record.ultracode === 'true') {
+    return 'ultracode';
+  }
+  const raw = record.effort
+    ?? record.effortLevel
+    ?? record.effort_level
+    ?? record.reasoning_effort
+    ?? record.reasoningEffort;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+}
+
+export function extractClaudeEffortFromHookInput(hookInput: unknown): string | null {
+  const input = asRecord(hookInput);
+  return directEffortFromRecord(input) ?? directEffortFromRecord(asRecord(input?.metadata));
+}
+
+export function extractClaudeEffortFromTranscriptJsonl(jsonl: string): string | null {
+  const lines = transcriptLines({ text: jsonl });
+  let ultraActive = false;
+  let apiEffort: string | null = null;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (!line) {
+      continue;
+    }
+    // Skip lines that cannot carry effort or ultracode state before JSON.parse.
+    if (
+      !line.includes('"api-request"')
+      && !line.includes('ultra_effort_enter')
+      && !line.includes('ultra_effort_exit')
+    ) {
+      continue;
+    }
+
+    let record: JsonRecord | null;
+    try {
+      record = asRecord(JSON.parse(line));
+    } catch (_) {
+      continue;
+    }
+    if (!record) {
+      continue;
+    }
+    if (record.type === 'attachment') {
+      const attachment = asRecord(record.attachment);
+      if (attachment?.type === 'ultra_effort_enter') {
+        ultraActive = true;
+      } else if (attachment?.type === 'ultra_effort_exit') {
+        ultraActive = false;
+      }
+      continue;
+    }
+    if (record.type === 'api-request') {
+      const params = asRecord(record.params);
+      const outputConfig = asRecord(params?.output_config);
+      const raw = outputConfig?.effort ?? params?.effort;
+      if (typeof raw === 'string' && raw.trim()) {
+        apiEffort = raw.trim();
+        // Ultracode sends `xhigh` underneath; a non-xhigh API call means effort moved off Ultracode.
+        if (ultraActive && apiEffort.toLowerCase() !== 'xhigh') {
+          ultraActive = false;
+        }
+      }
+    }
+  }
+
+  return ultraActive ? 'ultracode' : apiEffort;
+}
+
+export function readClaudeTranscriptMetadata(
+  transcriptPath: unknown,
+  options: ClaudeTranscriptReadOptions = {}
+): { model: string | null; effort: string | null } {
+  if (typeof transcriptPath !== 'string' || !transcriptPath.trim()) {
+    return { model: null, effort: null };
+  }
+
+  const maxBytes = Number.isFinite(options.maxBytes) && Number(options.maxBytes) > 0
+    ? Math.floor(Number(options.maxBytes))
+    : DEFAULT_TRANSCRIPT_TAIL_BYTES;
+  const readTail = options.readTail ?? defaultReadTranscriptTail;
+
+  try {
+    const tail = readTail(transcriptPath.trim(), maxBytes);
+    const joined = transcriptLines(tail).join('\n');
+    return {
+      model: extractClaudeModelFromTranscriptJsonl(joined),
+      effort: extractClaudeEffortFromTranscriptJsonl(joined)
+    };
+  } catch (_) {
+    return { model: null, effort: null };
+  }
+}
+
+let cachedClaudeSettingsEffort: { filePath: string; mtimeMs: number; effort: string | null } | null = null;
+
+export function getClaudeSettingsFilePath(): string {
+  const configured = String(process.env.CLAUDE_CONFIG_DIR || '').trim();
+  const dir = configured
+    ? (configured === '~' ? os.homedir() : configured.startsWith('~/') || configured.startsWith('~\\')
+      ? path.join(os.homedir(), configured.slice(2))
+      : path.resolve(configured))
+    : path.join(os.homedir(), '.claude');
+  return path.join(dir, 'settings.json');
+}
+
+export function readClaudeSettingsEffort(settingsFile: string = getClaudeSettingsFilePath()): string | null {
+  try {
+    const stat = fs.statSync(settingsFile);
+    if (cachedClaudeSettingsEffort
+      && cachedClaudeSettingsEffort.filePath === settingsFile
+      && cachedClaudeSettingsEffort.mtimeMs === stat.mtimeMs) {
+      return cachedClaudeSettingsEffort.effort;
+    }
+    const parsed = asRecord(JSON.parse(fs.readFileSync(settingsFile, 'utf8')));
+    const effort = directEffortFromRecord(parsed);
+    cachedClaudeSettingsEffort = { filePath: settingsFile, mtimeMs: stat.mtimeMs, effort };
+    return effort;
+  } catch (_) {
+    return null;
+  }
 }
 
 export function extractClaudeModelFromTranscriptRecord(value: unknown): string | null {

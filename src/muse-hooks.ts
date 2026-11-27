@@ -545,6 +545,10 @@ export function museHookSessionFromArgs(args: Record<string, string | boolean>):
   const model = getArgString(args, 'model')
     || normalizeMuseHookModel(topLevelString(input, ['model']))
     || undefined;
+  const effort = getArgString(args, 'effort')
+    || getArgString(args, 'reasoning-effort')
+    || topLevelString(input, ['effort', 'reasoning_effort', 'reasoningEffort'])
+    || undefined;
   const status = statusFromMuseHookEvent(event);
   const now = Date.now();
   const existing = status !== 'stopped'
@@ -588,7 +592,8 @@ export function museHookSessionFromArgs(args: Record<string, string | boolean>):
     session_id: sessionId,
     cwd,
     updated_at: now,
-    model
+    model,
+    ...(effort ? { effort } : {})
   };
   if (binding) {
     session.musePid = binding.musePid;

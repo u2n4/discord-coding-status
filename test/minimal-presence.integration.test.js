@@ -28,8 +28,24 @@ const {
   waitFor
 } = require('./helpers');
 
-test('enrich keeps only the Model line and drops effort with it', async () => {
-  const enriched = await enrichToolForPresence({
+test('enrich keeps only the Model line, showing XHigh/Max/Ultracode and hiding lower efforts', async () => {
+  const high = await enrichToolForPresence({
+    key: 'state:abc',
+    family: 'codex',
+    source: 'hook',
+    details: 'Using Codex',
+    state: 'Codex',
+    status: 'thinking',
+    activity: 'Cooking tokens',
+    model: 'gpt-5.6-sol',
+    effort: 'high'
+  });
+
+  assert.equal(high.details, 'Model: GPT-5.6-Sol');
+  assert.equal(high.state, '');
+  assert.doesNotMatch(`${high.details} ${high.state}`, /high|Cooking|thinking/i);
+
+  const xhigh = await enrichToolForPresence({
     key: 'state:abc',
     family: 'codex',
     source: 'hook',
@@ -40,10 +56,9 @@ test('enrich keeps only the Model line and drops effort with it', async () => {
     model: 'gpt-5.6-sol',
     effort: 'xhigh'
   });
-
-  assert.equal(enriched.details, 'Model: GPT-5.6-Sol');
-  assert.equal(enriched.state, '');
-  assert.doesNotMatch(`${enriched.details} ${enriched.state}`, /xhigh|Cooking|thinking/i);
+  assert.equal(xhigh.details, 'Model: GPT-5.6-Sol (XHigh)');
+  assert.equal(xhigh.state, '');
+  assert.doesNotMatch(`${xhigh.details} ${xhigh.state}`, /Cooking|thinking/i);
 });
 
 test('enrich without a model yields empty lines (application name only)', async () => {

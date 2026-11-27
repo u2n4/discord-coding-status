@@ -1,7 +1,11 @@
 'use strict';
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { CLAUDE_DESKTOP_MODEL_LABEL_MAX_LENGTH } from '../../core/detection/claude-desktop-model';
+import {
+  CLAUDE_DESKTOP_MODEL_LABEL_MAX_LENGTH,
+  parseClaudeDesktopButtonEffort
+} from '../../core/detection/claude-desktop-model';
+import { displayEffortLabel } from '../../core/presence/effort';
 import type { ActiveTool } from '../../core/tools/types';
 
 // Persistent Claude Desktop selected-model sampler (Windows only).
@@ -132,7 +136,7 @@ export function buildClaudeDesktopModelSamplerScript(
     ` $watchNowFocus=$null; $watchNowId=''`,
     ` if ($watchSplit -or $watchFound -eq $null) { try { $watchNowFocus=[System.Windows.Automation.AutomationElement]::FocusedElement; if ($watchNowFocus -ne $null -and $watchNowFocus.Current.ProcessId -eq $watchExpected) { $watchNowId=[string]::Join('.',$watchNowFocus.GetRuntimeId()) } else { $watchNowFocus=$null } } catch { $watchNowFocus=$null; $watchNowId='' } }`,
     ` if ($watchFound -eq $null -or ($watchTicks % ${BUTTON_RESCAN_EVERY_TICKS}) -eq 0 -or ($watchSplit -and $watchNowId -ne $watchFocusId)) { $watchCond=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button); $watchButtons=$watchRoot.FindAll([System.Windows.Automation.TreeScope]::Descendants, $watchCond); $watchMatches=New-Object System.Collections.ArrayList; foreach ($watchB in $watchButtons) { try { $watchN=$watchB.Current.Name } catch { continue }; if ($watchN -ne $null -and $watchN.Trim().StartsWith('Model:')) { [void]$watchMatches.Add($watchB) } }; $watchSplit=$watchMatches.Count -gt 1; $watchFocusId=$watchNowId; if ($watchMatches.Count -eq 1) { $watchFound=$watchMatches[0]; $watchButton=$watchFound } elseif ($watchMatches.Count -eq 0) { $watchFound=$null; $watchButton=$null } elseif ($watchNowFocus -ne $null) { $watchPane=-1; try { $watchChains=New-Object System.Collections.ArrayList; foreach ($watchB in $watchMatches) { [void]$watchChains.Add((Get-WatchChain $watchB)) }; $watchPane=Select-WatchPane (Get-WatchChain $watchNowFocus) $watchChains } catch { $watchPane=-1 }; if ($watchPane -ge 0) { $watchFound=$watchMatches[$watchPane]; $watchButton=$watchFound } } }`,
-    ` if ($watchFound -ne $null) { try { $watchChildCond=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text); $watchChild=$watchFound.FindFirst([System.Windows.Automation.TreeScope]::Children, $watchChildCond); if ($watchChild -ne $null) { $watchLabel=$watchChild.Current.Name; if ($watchLabel -ne $null) { $watchLabel=$watchLabel.Trim(); if ($watchLabel -ne '' -and $watchLabel.Length -le ${CLAUDE_DESKTOP_MODEL_LABEL_MAX_LENGTH}) { $watchState='MODEL|'+$watchLabel } } } } catch { $watchState='UNAVAILABLE' } }`,
+    ` if ($watchFound -ne $null) { try { $watchChildCond=New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Text); $watchChild=$watchFound.FindFirst([System.Windows.Automation.TreeScope]::Children, $watchChildCond); if ($watchChild -ne $null) { $watchLabel=$watchChild.Current.Name; if ($watchLabel -ne $null) { $watchLabel=$watchLabel.Trim(); if ($watchLabel -ne '' -and $watchLabel.Length -le ${CLAUDE_DESKTOP_MODEL_LABEL_MAX_LENGTH}) { $watchEffort=''; try { $watchFull=$watchFound.Current.Name; if ($watchFull -ne $null) { $watchBody=$watchFull.Trim().Substring(6).Trim(); if ($watchBody.StartsWith($watchLabel,[System.StringComparison]::OrdinalIgnoreCase)) { $watchTail=$watchBody.Substring($watchLabel.Length).Trim(); if ($watchTail -match '^(?:Extra(?:\\s+High)?|XHigh|X-High|Max|Ultracode|Ultra\\s+Code)$') { $watchEffort=$watchTail } } } } catch {}; $watchState=if ($watchEffort -ne '') { 'MODEL|'+$watchLabel+'|'+$watchEffort } else { 'MODEL|'+$watchLabel } } } } } catch { $watchState='UNAVAILABLE' } }`,
     ` }; $watchFail=0 } catch { $watchFail++; if ($watchFail -ge ${MAX_CONSECUTIVE_FAILURES}) { Write-Error ("claude desktop model uia failed: " + $_.Exception.Message); exit 3 } }`,
     ` }`,
     ` if ($watchState -ne $watchLast) { $watchLast=$watchState; Write-Output $watchState }`,
@@ -142,7 +146,7 @@ export function buildClaudeDesktopModelSamplerScript(
 }
 
 export type ClaudeDesktopModelEvent =
-  | { kind: 'model'; model: string }
+  | { kind: 'model'; model: string; effort?: string | null }
   | { kind: 'unbound' }
   | { kind: 'unavailable' };
 
@@ -234,12 +238,17 @@ function handleStdoutChunk(chunk: string): void {
     }
 
     if (text.startsWith('MODEL|')) {
-      const label = text.slice('MODEL|'.length).trim();
+      const payload = text.slice('MODEL|'.length);
+      const separator = payload.indexOf('|');
+      const label = (separator === -1 ? payload : payload.slice(0, separator)).trim();
+      const rawEffort = separator === -1 ? null : payload.slice(separator + 1).trim();
+      const effort = rawEffort ? displayEffortLabel(rawEffort) : null;
       if (!label || label.length > CLAUDE_DESKTOP_MODEL_LABEL_MAX_LENGTH) {
         emitEvent({ kind: 'unavailable' }, 'UNAVAILABLE');
         continue;
       }
-      emitEvent({ kind: 'model', model: label }, 'MODEL|' + label);
+      const key = effort ? `MODEL|${label}|${effort}` : `MODEL|${label}`;
+      emitEvent({ kind: 'model', model: label, ...(effort ? { effort } : {}) }, key);
       continue;
     }
 
@@ -517,6 +526,7 @@ export function resetClaudeDesktopModelWatcherForTests(): void {
 export interface VerifiedClaudeDesktopModel {
   pid: number;
   model: string;
+  effort?: string | null;
   updatedAt: number;
   /** Last time the Desktop window was seen focused (or the model re-read). */
   observedAt: number;
@@ -535,7 +545,12 @@ export function getVerifiedClaudeDesktopModel(): VerifiedClaudeDesktopModel | nu
   return verifiedDesktopModel ? { ...verifiedDesktopModel } : null;
 }
 
-export function setVerifiedClaudeDesktopModel(pid: number, model: string, now = Date.now()): void {
+export function setVerifiedClaudeDesktopModel(
+  pid: number,
+  model: string,
+  nowOrEffort: number | string | null = Date.now(),
+  maybeNow?: number
+): void {
   if (!Number.isFinite(pid) || Math.floor(pid) <= 0) {
     return;
   }
@@ -546,7 +561,15 @@ export function setVerifiedClaudeDesktopModel(pid: number, model: string, now = 
   if (!label || label.length > CLAUDE_DESKTOP_MODEL_LABEL_MAX_LENGTH) {
     return;
   }
-  verifiedDesktopModel = { pid: Math.floor(pid), model: label, updatedAt: now, observedAt: now };
+  const effort = typeof nowOrEffort === 'string' ? displayEffortLabel(nowOrEffort) : null;
+  const now = typeof nowOrEffort === 'number' ? nowOrEffort : (maybeNow ?? Date.now());
+  verifiedDesktopModel = {
+    pid: Math.floor(pid),
+    model: label,
+    ...(effort ? { effort } : {}),
+    updatedAt: now,
+    observedAt: now
+  };
 }
 
 /** Refreshes the observation time while the bound Desktop PID is focused. */
@@ -586,9 +609,9 @@ export function resetClaudeDesktopModelCacheForTests(): void {
  *   model (never relabelled).
  */
 export type ClaudeDesktopDisplayOverride =
-  | { kind: 'model'; model: string }
+  | { kind: 'model'; model: string; effort?: string | null }
   | { kind: 'app-only' }
-  | { kind: 'retained'; model: string; observedAt: number }
+  | { kind: 'retained'; model: string; effort?: string | null; observedAt: number }
   | null;
 
 export const CLAUDE_DESKTOP_PROVIDER_ID = 'claudeApp';
@@ -644,7 +667,15 @@ export function applyClaudeDesktopDisplayOverride(
     if (!label) {
       return { ...desktop, details: '', state: '', model: null };
     }
-    return { ...desktop, details: truncateDesktopDetails('Model: ' + label), state: '', model: label };
+    const visibleEffort = displayEffortLabel(override.effort);
+    const suffix = visibleEffort && !label.endsWith(` (${visibleEffort})`) ? ` (${visibleEffort})` : '';
+    return {
+      ...desktop,
+      details: truncateDesktopDetails(`Model: ${label}${suffix}`),
+      state: '',
+      model: label,
+      ...(visibleEffort ? { effort: visibleEffort } : {})
+    };
   });
 
   return touched ? next : [...tools];

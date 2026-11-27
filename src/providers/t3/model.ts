@@ -25,6 +25,7 @@ const EFFORT_SUFFIX = /\s*\((?:minimal|low|medium|high|xhigh|extra high|max|thin
 
 export interface T3PresenceSnapshot {
   model: string | null;
+  effort?: string | null;
   instanceId: string | null;
   workingAgents: number;
 }
@@ -224,6 +225,10 @@ const MODEL_SQL = `
     thread_id,
     json_extract(payload_json, '$.modelSelection.model') AS model,
     json_extract(payload_json, '$.modelSelection.instanceId') AS instance_id,
+    json_extract(payload_json, '$.modelSelection.options') AS options_json,
+    json_extract(payload_json, '$.modelSelection.effort') AS direct_effort,
+    json_extract(payload_json, '$.modelSelection.reasoningEffort') AS direct_reasoning_effort,
+    json_extract(payload_json, '$.modelSelection.ultracode') AS direct_ultracode,
     COALESCE(json_extract(payload_json, '$.lastVisitedAt'), updated_at) AS seen_at
   FROM orchestration_v2_projection_threads
   WHERE deleted_at IS NULL
@@ -321,15 +326,85 @@ function tryCountQuery(db: { prepare: (sql: string) => { get: () => any } }, sql
   }
 }
 
+const T3_EFFORT_OPTION_IDS = new Set([
+  'effort',
+  'reasoningeffort',
+  'reasoning_effort',
+  'thought_level',
+  'thoughtlevel',
+  'variant'
+]);
+
+export function extractT3OptionEffort(options: unknown, fallbackRecord?: Record<string, unknown> | null): string | null {
+  let parsed = options;
+  if (typeof parsed === 'string' && parsed.trim()) {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch (_) {
+      parsed = null;
+    }
+  }
+  let effort: string | null = null;
+  if (Array.isArray(parsed)) {
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') {
+        continue;
+      }
+      const entry = item as { id?: unknown; value?: unknown };
+      const id = typeof entry.id === 'string' ? entry.id.trim().toLowerCase() : '';
+      if (id === 'ultracode' && (entry.value === true || entry.value === 'true')) {
+        return 'ultracode';
+      }
+      if (T3_EFFORT_OPTION_IDS.has(id) && typeof entry.value === 'string' && entry.value.trim()) {
+        effort = entry.value.trim();
+      }
+    }
+  } else if (parsed && typeof parsed === 'object') {
+    const obj = parsed as Record<string, unknown>;
+    if (obj.ultracode === true || obj.ultracode === 'true') {
+      return 'ultracode';
+    }
+    for (const [rawKey, rawValue] of Object.entries(obj)) {
+      if (T3_EFFORT_OPTION_IDS.has(rawKey.trim().toLowerCase()) && typeof rawValue === 'string' && rawValue.trim()) {
+        effort = rawValue.trim();
+      }
+    }
+  }
+  if (effort) {
+    return effort;
+  }
+  if (fallbackRecord) {
+    if (fallbackRecord.ultracode === true || fallbackRecord.ultracode === 1 || fallbackRecord.ultracode === 'true') {
+      return 'ultracode';
+    }
+    const direct = asText(fallbackRecord.effort) || asText(fallbackRecord.reasoningEffort);
+    if (direct) {
+      return direct;
+    }
+  }
+  return null;
+}
+
 function readSnapshot(db: { prepare: (sql: string) => { get: () => any }; close: () => void }): T3DatabaseSnapshot {
   const row = db.prepare(MODEL_SQL).get() as {
     thread_id?: unknown;
     model?: unknown;
     instance_id?: unknown;
+    options_json?: unknown;
+    direct_effort?: unknown;
+    direct_reasoning_effort?: unknown;
+    direct_ultracode?: unknown;
     seen_at?: unknown;
   } | undefined;
   const model = asModelId(row?.model);
   const instanceId = asText(row?.instance_id);
+  const effort = model
+    ? extractT3OptionEffort(row?.options_json, {
+      effort: row?.direct_effort,
+      reasoningEffort: row?.direct_reasoning_effort,
+      ultracode: row?.direct_ultracode
+    })
+    : null;
   const seenAtMs = typeof row?.seen_at === 'string' ? Date.parse(row.seen_at) : NaN;
   // Prefer the indexed `runs` table when present; fall back to `nodes` on
   // older schemas or minimal fixtures. A missing subagent table never drops
@@ -339,6 +414,7 @@ function readSnapshot(db: { prepare: (sql: string) => { get: () => any }; close:
   const extras = (runThreads !== null ? tryCountQuery(db, SUBAGENT_RUNS_SQL) : tryCountQuery(db, SUBAGENT_SQL)) ?? 0;
   return {
     model,
+    effort,
     instanceId,
     workingAgents: threads + extras,
     threadId: asText(row?.thread_id),
@@ -391,6 +467,7 @@ const MAX_LOG_BYTES = 16 * 1024 * 1024;
 
 export interface T3Selection {
   model: string;
+  effort?: string | null;
   instanceId: string;
 }
 
@@ -613,12 +690,17 @@ function selectionFrom(value: unknown, fallbackInstance: string): T3Selection | 
   if (!value || typeof value !== 'object') {
     return null;
   }
-  const record = value as { model?: unknown; instanceId?: unknown };
+  const record = value as Record<string, unknown>;
   const model = asModelId(record.model);
   if (!model) {
     return null;
   }
-  return { model, instanceId: asText(record.instanceId) || fallbackInstance };
+  const effort = extractT3OptionEffort(record.options, record);
+  return {
+    model,
+    ...(effort ? { effort } : {}),
+    instanceId: asText(record.instanceId) || fallbackInstance
+  };
 }
 
 function objectOrEmpty(value: unknown): Record<string, any> {
@@ -762,7 +844,7 @@ export function readT3Drafts(): T3Drafts {
 }
 
 function selectionKey(selection: T3Selection | null): string {
-  return selection ? `${selection.instanceId}\t${selection.model}` : '';
+  return selection ? `${selection.instanceId}\t${selection.model}\t${selection.effort || ''}` : '';
 }
 
 // The draft whose model just changed, or that just appeared, is the one on
@@ -828,13 +910,19 @@ export function readT3Presence(): T3PresenceSnapshot | null {
   }
 
   const model = selection ? selection.model : database?.model ?? null;
+  const effort = selection ? (selection.effort ?? null) : (database?.effort ?? null);
   const instanceId = selection ? selection.instanceId : database?.instanceId ?? null;
   const workingAgents = database?.workingAgents ?? 0;
-  const cacheKey = `${source}\t${model}\t${instanceId}\t${workingAgents}`;
+  const cacheKey = `${source}\t${model}\t${effort || ''}\t${instanceId}\t${workingAgents}`;
   if (presenceCache && presenceCache.key === cacheKey) {
     return presenceCache.snapshot;
   }
-  const snapshot: T3PresenceSnapshot = { model, instanceId, workingAgents };
+  const snapshot: T3PresenceSnapshot = {
+    model,
+    ...(effort ? { effort } : {}),
+    instanceId,
+    workingAgents
+  };
   presenceCache = { key: cacheKey, snapshot };
   return snapshot;
 }

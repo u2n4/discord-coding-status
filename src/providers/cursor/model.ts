@@ -16,6 +16,7 @@ const APPLICATION_USER_KEY = 'src.vs.platform.reactivestorage.browser.reactiveSt
 
 export interface CursorModel {
   model: string;
+  effort?: string | null;
   filePath: string;
   mtimeMs: number;
 }
@@ -43,12 +44,28 @@ export function getCursorStateDatabase(): string {
   return cursorStateDbPath();
 }
 
-export function parseCursorApplicationUser(json: unknown): string | null {
+export interface CursorParsedSelection {
+  model: string;
+  effort: string | null;
+}
+
+export function parseCursorApplicationUserSelection(json: unknown): CursorParsedSelection | null {
   const user = json as {
-    aiSettings?: { modelConfig?: { composer?: { modelName?: unknown } } };
+    aiSettings?: {
+      modelConfig?: {
+        composer?: {
+          modelName?: unknown;
+          selectedModels?: Array<{
+            modelId?: unknown;
+            parameters?: Array<{ id?: unknown; value?: unknown }>;
+          }>;
+        };
+      };
+    };
     availableDefaultModels2?: Array<{ serverModelName?: unknown; name?: unknown; inputboxShortModelName?: unknown }>;
   } | null;
-  const picked = user?.aiSettings?.modelConfig?.composer?.modelName;
+  const composer = user?.aiSettings?.modelConfig?.composer;
+  const picked = composer?.modelName;
   if (typeof picked !== 'string' || !picked.trim()) {
     return null;
   }
@@ -56,14 +73,40 @@ export function parseCursorApplicationUser(json: unknown): string | null {
   const entry = (Array.isArray(user?.availableDefaultModels2) ? user!.availableDefaultModels2! : [])
     .find((model) => model?.serverModelName === id || model?.name === id);
   const label = typeof entry?.inputboxShortModelName === 'string' ? entry.inputboxShortModelName.trim() : '';
-  if (label && label.length <= 80) {
-    return label;
+  const model = label && label.length <= 80 ? label : (id === 'default' ? 'Auto' : id);
+
+  // Effort lives in `composer.selectedModels[i].parameters` as `{ id: "effort", value }`.
+  // `maxMode` is Cursor's 1M-context toggle (independent of effort) and is never read here.
+  let effort: string | null = null;
+  const selectedModels = Array.isArray(composer?.selectedModels) ? composer.selectedModels : [];
+  const selected = selectedModels.find((candidate) => candidate?.modelId === id) || selectedModels[0];
+  const parameters = Array.isArray(selected?.parameters) ? selected.parameters : [];
+  for (const param of parameters) {
+    const paramId = typeof param?.id === 'string' ? param.id.trim().toLowerCase() : '';
+    if (paramId === 'ultracode' && (param?.value === true || param?.value === 'true')) {
+      effort = 'ultracode';
+      break;
+    }
+    if ((paramId === 'effort' || paramId === 'reasoningeffort' || paramId === 'reasoning_effort')
+      && typeof param?.value === 'string' && param.value.trim()) {
+      effort = param.value.trim();
+    }
   }
-  // Cursor's own name for the automatic router.
-  return id === 'default' ? 'Auto' : id;
+  if (!effort) {
+    if (/(?:^|-)ultracode(?:$|-fast$)/i.test(id)) {
+      effort = 'ultracode';
+    } else if (/(?:^|-)xhigh(?:$|-fast$)/i.test(id)) {
+      effort = 'xhigh';
+    }
+  }
+  return { model, effort };
 }
 
-let cache: { filePath: string; signature: string; model: string | null } | null = null;
+export function parseCursorApplicationUser(json: unknown): string | null {
+  return parseCursorApplicationUserSelection(json)?.model || null;
+}
+
+let cache: { filePath: string; signature: string; selection: CursorParsedSelection | null } | null = null;
 
 function fileSignature(filePath: string): string | null {
   try {
@@ -96,7 +139,7 @@ export function readCursorModel(): CursorModel | null {
       db = new sqlite.DatabaseSync(filePath, { readOnly: true });
       const row = db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(APPLICATION_USER_KEY) as { value?: unknown } | undefined;
       const text = typeof row?.value === 'string' ? row.value : row?.value ? Buffer.from(row.value as Uint8Array).toString('utf8') : '';
-      cache = { filePath, signature, model: text ? parseCursorApplicationUser(JSON.parse(text)) : null };
+      cache = { filePath, signature, selection: text ? parseCursorApplicationUserSelection(JSON.parse(text)) : null };
     } catch (_) {
       // Locked or mid-write: nothing is cached, so the next pass reads again.
       return null;
@@ -106,5 +149,12 @@ export function readCursorModel(): CursorModel | null {
       } catch (_) {}
     }
   }
-  return cache.model ? { model: cache.model, filePath, mtimeMs: Date.now() } : null;
+  return cache.selection
+    ? {
+      model: cache.selection.model,
+      effort: cache.selection.effort,
+      filePath,
+      mtimeMs: Date.now()
+    }
+    : null;
 }

@@ -194,12 +194,19 @@ function appendMuseModelRecord(file, sessionId, modelId, recordedAtMs, sequence)
 test('a selected bound model change applies with no new focus event', async (t) => {
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'fast-focus-muse-'));
   const previous = process.env.XDG_DATA_HOME;
+  const previousMuseSettings = process.env.DISCORD_CODING_STATUS_MUSE_SETTINGS_FILE;
   process.env.XDG_DATA_HOME = scratch;
+  process.env.DISCORD_CODING_STATUS_MUSE_SETTINGS_FILE = path.join(scratch, 'muse-settings.json');
   t.after(() => {
     if (previous === undefined) {
       delete process.env.XDG_DATA_HOME;
     } else {
       process.env.XDG_DATA_HOME = previous;
+    }
+    if (previousMuseSettings === undefined) {
+      delete process.env.DISCORD_CODING_STATUS_MUSE_SETTINGS_FILE;
+    } else {
+      process.env.DISCORD_CODING_STATUS_MUSE_SETTINGS_FILE = previousMuseSettings;
     }
     fs.rmSync(scratch, { recursive: true, force: true });
   });

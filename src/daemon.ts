@@ -93,6 +93,9 @@ import {
   getAntigravityStateFile,
   readActiveAntigravityModel
 } from './providers/antigravity/model';
+import { getCursorStateDatabase } from './providers/cursor/model';
+import { getOpenCodeStateFile } from './providers/opencode/model';
+import { getClaudeSettingsFilePath } from './claude-hooks';
 import { onAntigravityLiveLabelsChanged } from './providers/antigravity/live-labels';
 import {
   APP_TITLE,
@@ -739,6 +742,16 @@ function updateSelectedModelWatch(
         const database = getT3StateDatabase();
         const wal = `${database}-wal`;
         file = fs.existsSync(wal) ? wal : database;
+      } else if (selected.family === 'cursor' && selected.providerId === 'cursorApp') {
+        const database = getCursorStateDatabase();
+        const wal = `${database}-wal`;
+        file = fs.existsSync(wal) ? wal : (fs.existsSync(database) ? database : null);
+      } else if (selected.family === 'opencode') {
+        const stateFile = getOpenCodeStateFile();
+        file = fs.existsSync(stateFile) ? stateFile : null;
+      } else if (selected.family === 'claude' && selected.providerId !== 'claudeApp') {
+        const settingsFile = getClaudeSettingsFilePath();
+        file = fs.existsSync(settingsFile) ? settingsFile : null;
       } else if (selected.family === 'antigravity') {
         const stateFile = getAntigravityStateFile();
         file = (fs.existsSync(stateFile) ? stateFile : null)
@@ -879,7 +892,7 @@ function ensureClaudeDesktopModelTracker(expectedPid: number | null): void {
     (event) => {
       if (event.kind === 'model') {
         try {
-          setVerifiedClaudeDesktopModel(expectedPid, event.model);
+          setVerifiedClaudeDesktopModel(expectedPid, event.model, event.effort ?? null);
         } catch (_) {
           // Cache writes are best effort; the helper re-emits on change.
         }
@@ -1099,7 +1112,7 @@ async function runFastPass(generation: number): Promise<void> {
       const hosted = verified ? null : readDesktopHostedClaudeModel(desktopFgPid, getCachedProcessList());
       if (verified) {
         desktopLabelPending = null;
-        desktopOverride = { kind: 'model', model: verified.model };
+        desktopOverride = { kind: 'model', model: verified.model, effort: verified.effort ?? null };
       } else if (hosted) {
         desktopLabelPending = null;
         desktopOverride = { kind: 'model', model: hosted };
@@ -1134,7 +1147,12 @@ async function runFastPass(generation: number): Promise<void> {
         // takes the no-override path below (the Desktop cache stays parked).
         const retained = getVerifiedDesktopModelForDisplay();
         if (retained) {
-          desktopOverride = { kind: 'retained', model: retained.model, observedAt: retained.observedAt };
+          desktopOverride = {
+            kind: 'retained',
+            model: retained.model,
+            effort: retained.effort ?? null,
+            observedAt: retained.observedAt
+          };
         } else {
           clearVerifiedClaudeDesktopModel();
           desktopOverride = null;

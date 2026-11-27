@@ -20,9 +20,10 @@ import {
   pickTimedMessage
 } from './presence-text';
 import {
+  extractClaudeEffortFromHookInput,
   extractClaudeModelFromHookInput,
   extractClaudeSessionId,
-  readClaudeModelFromTranscript
+  readClaudeTranscriptMetadata
 } from './claude-hooks';
 import {
   evaluateClaudeQuotaEligibility,
@@ -331,14 +332,18 @@ export function readCodexTurnMetadata(transcriptPath: string | null): { model: s
           continue;
         }
 
+        const collab = asRecord(payload.collaboration_mode);
+        const collabSettings = asRecord(collab?.settings);
         return {
-          model: extractString(payload.model),
+          model: extractString(payload.model) ?? extractString(collabSettings?.model),
           effort: extractString(
             payload.effort
               ?? payload.reasoning_effort
               ?? payload.reasoningEffort
               ?? payload.model_reasoning_effort
               ?? payload.modelReasoningEffort
+              ?? collabSettings?.reasoning_effort
+              ?? collabSettings?.effort
           )
         };
       } catch (_) {
@@ -787,11 +792,18 @@ export function claudeHookSessionFromArgs(args: Record<string, string | boolean>
     || findStringDeep(input, ['conversation_id', 'conversationId', 'thread_id', 'threadId'])
     || `claude:cli:${cwd}:${process.ppid}`;
   // "default" is Claude Code's "use the account default" setting, not a model.
+  const transcriptMeta = readClaudeTranscriptMetadata(transcriptPath);
   const model = [
     getArgString(args, 'model'),
     extractClaudeModelFromHookInput(input),
-    readClaudeModelFromTranscript(transcriptPath)
+    transcriptMeta.model
   ].find((value) => typeof value === 'string' && value.trim() && value.trim().toLowerCase() !== 'default') || undefined;
+  const effort = [
+    getArgString(args, 'effort'),
+    getArgString(args, 'reasoning-effort'),
+    extractClaudeEffortFromHookInput(input),
+    transcriptMeta.effort
+  ].find((value) => typeof value === 'string' && value.trim()) || undefined;
   const quotaRequestOptions = claudeQuotaRequestOptions();
   const eligibility = evaluateClaudeQuotaEligibility(
     quotaRequestOptions.environment || process.env,
@@ -810,6 +822,7 @@ export function claudeHookSessionFromArgs(args: Record<string, string | boolean>
     title: getArgString(args, 'title') || undefined,
     activity: getArgString(args, 'activity') || activityFromClaudeHook(event, input) || undefined,
     model,
+    effort,
     context: getArgString(args, 'context') || undefined,
     claude_quota_eligible: eligibility.eligible,
     claude_entrypoint: normalizeClaudeEntrypoint(process.env.CLAUDE_CODE_ENTRYPOINT)

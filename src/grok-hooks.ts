@@ -304,9 +304,9 @@ export function resolveGrokModelAndEffort(
     || topLevelString(input, ['session_id', 'sessionId']);
   const cwd = (args ? getArgString(args, 'cwd') : null)
     || topLevelString(input, ['cwd', 'current_working_directory', 'working_directory', 'workspace', 'workspaceRoot']);
-  const summaryModel = sessionId ? readGrokSessionSummaryModel(sessionId, cwd)?.model || null : null;
-  const model: string | null = argModel || inputModel || summaryModel || null;
-  const effort: string | null = argEffort || inputEffort || null;
+  const summary = sessionId ? readGrokSessionSummaryModel(sessionId, cwd) : null;
+  const model: string | null = argModel || inputModel || summary?.model || null;
+  const effort: string | null = argEffort || inputEffort || summary?.effort || null;
 
   return {
     model: model || undefined,

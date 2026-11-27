@@ -39,8 +39,9 @@ import {
   toolProviders
 } from './providers/registry';
 import { discordApplicationForTool } from './providers/discord';
-import { readMuseExecModelForProcess, readMuseTuiModelForProcess } from './providers/muse/model';
-import { parseCodexCommandLineModel, readCodexConfiguredModel, readCodexDesktopModel } from './providers/codex/model';
+import { readMuseExecModelForProcess, readMuseSettingsEffort, readMuseTuiModelForProcess } from './providers/muse/model';
+import { parseCodexCommandLine, readCodexConfiguredModel, readCodexDesktopModel } from './providers/codex/model';
+import { readClaudeSettingsEffort } from './claude-hooks';
 import { readGrokProcessModel, readGrokSessionSummaryModel } from './providers/grok/model';
 import { readOpenCodeModel } from './providers/opencode/model';
 import { readCursorModel } from './providers/cursor/model';
@@ -51,7 +52,7 @@ import {
   readAntigravityStatePlaceholder
 } from './providers/antigravity/model';
 import { ensureAntigravityLiveLabels } from './providers/antigravity/live-labels';
-import { displayModelLabel } from './providers/model-label';
+import { displayModelLabel, formatModelWithEffort } from './providers/model-label';
 import { readT3Presence, T3_VISIBLE_AGENT_MINIMUM } from './providers/t3/model';
 import { DEFAULT_T3_IMAGE_KEY, DEFAULT_T3_NIGHTLY_IMAGE_KEY } from './providers/t3/provider';
 import { isT3NightlyProcess } from './core/detection/tool-detection';
@@ -515,27 +516,38 @@ export function readDesktopHostedClaudeModel(desktopPid: number, processes: Proc
       return runnerFlag(commandLine, 'resume') === inUse.sessionId || runnerFlag(commandLine, 'session-id') === inUse.sessionId;
     });
     const hook = sessions.get(inUse.sessionId);
+    const freshHook = hook && (!runner?.createdAtMs || hook.updated_at >= runner.createdAtMs) ? hook : null;
     // A hook written before this runner started belongs to an earlier one.
-    const model = hook && (!runner?.createdAtMs || hook.updated_at >= runner.createdAtMs)
-      ? hook.model
-      : inUse.model || (runner ? runnerFlag(String(runner.commandLine || ''), 'model') : null);
-    return model ? truncatePresenceText(displayModelLabel('claude', model)) : null;
+    const model = freshHook?.model
+      || inUse.model
+      || (runner ? runnerFlag(String(runner.commandLine || ''), 'model') : null);
+    const runnerEffort = runner ? parseClaudeCommandLineEffort(String(runner.commandLine || '')) : null;
+    // Ultracode runs `xhigh` underneath, so Desktop's `sessionSettings.ultracode`
+    // stays authoritative when the hook only reports `xhigh`.
+    const hookEffort = freshHook?.effort || null;
+    const effort = inUse.effort === 'ultracode' && (!hookEffort || hookEffort.toLowerCase() === 'xhigh')
+      ? 'ultracode'
+      : (hookEffort || inUse.effort || runnerEffort || null);
+    return model ? truncatePresenceText(formatModelWithEffort('claude', model, effort)) : null;
   }
 
   const bound = new Set<string>();
-  const unbound: Array<{ flag: string | null; resume: string | null; createdAtMs: number }> = [];
+  const unbound: Array<{ flag: string | null; effortFlag: string | null; resume: string | null; createdAtMs: number }> = [];
   const models = new Set<string>();
+  const efforts = new Set<string>();
   for (const runner of runners) {
     const commandLine = String(runner.commandLine || '');
     const flag = runnerFlag(commandLine, 'model');
+    const effortFlag = parseClaudeCommandLineEffort(commandLine);
     const resume = runnerFlag(commandLine, 'resume');
     const session = resume ? sessions.get(resume) : undefined;
     // A hook written before this runner started belongs to an earlier one.
     if (session && (!runner.createdAtMs || session.updated_at >= runner.createdAtMs)) {
       bound.add(session.session_id);
       models.add(session.model as string);
+      efforts.add((session.effort || effortFlag || '').trim().toLowerCase());
     } else {
-      unbound.push({ flag, resume, createdAtMs: runner.createdAtMs || 0 });
+      unbound.push({ flag, effortFlag, resume, createdAtMs: runner.createdAtMs || 0 });
     }
   }
   const spare = [...sessions.values()].filter((session) => !bound.has(session.session_id));
@@ -550,11 +562,13 @@ export function readDesktopHostedClaudeModel(desktopPid: number, processes: Proc
       return null;
     }
     models.add(model);
+    efforts.add((session?.effort || runner.effortFlag || '').trim().toLowerCase());
   }
   if (models.size !== 1) {
     return null;
   }
-  return truncatePresenceText(displayModelLabel('claude', [...models][0]));
+  const agreedEffort = efforts.size === 1 ? ([...efforts][0] || null) : null;
+  return truncatePresenceText(formatModelWithEffort('claude', [...models][0], agreedEffort));
 }
 
 /**
@@ -656,10 +670,30 @@ export function getGitBranch(directory: string | null): string | null {
 }
 
 function modelTextForPresence(tool: ActiveTool): string | null {
-  // Raw model id only: reasoning effort and every other enrichment are
-  // intentionally excluded from the minimal display contract.
   const model = String(tool.model || '').replace(/\s+/g, ' ').trim();
   return model ? truncatePresenceText(model) : null;
+}
+
+function effortTextForPresence(tool: ActiveTool): string | null {
+  const effort = String(tool.effort || '').replace(/\s+/g, ' ').trim();
+  return effort || null;
+}
+
+function parseClaudeCommandLineEffort(commandLine: string | null | undefined): string | null {
+  if (typeof commandLine !== 'string' || !commandLine.trim()) {
+    return null;
+  }
+  if (/(?:^|\s)--ultracode(?:\s|$|=true)/i.test(commandLine)) {
+    return 'ultracode';
+  }
+  return runnerFlag(commandLine, 'effort');
+}
+
+function parseMuseCommandLineEffort(commandLine: string | null | undefined): string | null {
+  if (typeof commandLine !== 'string' || !commandLine.trim()) {
+    return null;
+  }
+  return runnerFlag(commandLine, 'reasoning-effort') || runnerFlag(commandLine, 'effort');
 }
 
 function isVerifiedLiveProcess(info: ProcessInfo | undefined): boolean {
@@ -683,65 +717,100 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
   }
 
   // Minimal display contract: the Discord application identity already shows
-  // the tool name ("Playing Codex"), and the published line is the model.
-  // T3 Code is the one exception: `N agents` is sent as state when at least
-  // five agents are working. No activity, project, branch, quota, context,
-  // package, emoji, or timestamps are ever sent.
+  // the tool name ("Playing Codex"), and the published line is the model
+  // (plus "(XHigh)", "(Max)", or "(Ultracode)" when one of those three high
+  // reasoning tiers is active). T3 Code also sends `N agents` as state when at
+  // least five agents are working. No activity, project, branch, quota,
+  // context, package, emoji, or timestamps are ever sent.
   let model = modelTextForPresence(tool);
+  let effort = effortTextForPresence(tool);
   let labelSurface: ModelLabelSurface | ActiveTool = tool;
   let state = '';
   const updatedAtMs = coerceStateTimestamp(tool.updatedAt) || 0;
 
   // Model fallbacks below only fill a gap or follow a newer persisted pick
   // that belongs to the same surface. Global guesses (Muse settings.json, the
-  // Grok config default) are never shown: unknown stays app-only.
-  if (tool.family === 'claude' && tool.providerId === 'claudeApp' && !model && tool.processInfo) {
-    // Desktop not in front (its window label is unread): its Code-tab sessions
-    // still name the model. The detected Claude.exe may be a helper process,
-    // so the runners are looked up under its topmost Claude.exe.
-    const processes = getCachedProcessList();
-    const hostPid = claudeDesktopHostPid(tool.processInfo, processes);
-    const hosted = hostPid ? readDesktopHostedClaudeModel(hostPid, processes) : null;
-    if (hosted) {
-      model = hosted;
+  // Grok config default) are never shown for models: unknown stays app-only.
+  if (tool.family === 'claude' && tool.providerId === 'claudeApp') {
+    if (!model && tool.processInfo) {
+      // Desktop not in front (its window label is unread): its Code-tab sessions
+      // still name the model and effort. The detected Claude.exe may be a helper
+      // process, so the runners are looked up under its topmost Claude.exe.
+      const processes = getCachedProcessList();
+      const hostPid = claudeDesktopHostPid(tool.processInfo, processes);
+      const hosted = hostPid ? readDesktopHostedClaudeModel(hostPid, processes) : null;
+      if (hosted) {
+        model = hosted;
+      }
+    }
+  } else if (tool.family === 'claude') {
+    if (!effort && tool.processInfo) {
+      effort = parseClaudeCommandLineEffort(tool.processInfo.commandLine || tool.processInfo.line);
+    }
+    if (!effort && model) {
+      effort = readClaudeSettingsEffort();
     }
   } else if (tool.family === 'codex') {
     if (tool.providerId === 'codexApp') {
       const desktop = readCodexDesktopModel();
-      if (desktop?.model && !model && isVerifiedLiveProcess(tool.processInfo)) {
-        model = truncatePresenceText(desktop.model);
+      if (desktop?.model && isVerifiedLiveProcess(tool.processInfo)) {
+        if (!model) {
+          model = truncatePresenceText(desktop.model);
+        }
+        if (!effort && desktop.effort) {
+          effort = desktop.effort;
+        }
       }
     } else {
       const configured = readCodexConfiguredModel();
-      if (configured?.model) {
-        if (tool.source === 'hook' && (!model || (updatedAtMs > 0 && configured.mtimeMs > updatedAtMs))) {
+      if (tool.source === 'hook') {
+        if (configured?.model && (!model || (updatedAtMs > 0 && configured.mtimeMs > updatedAtMs))) {
           model = truncatePresenceText(configured.model);
         }
+        if (configured?.effort && (!effort || (updatedAtMs > 0 && (configured.effortChangedAtMs || 0) > updatedAtMs))) {
+          effort = configured.effort;
+        }
       }
-      if (tool.source === 'process' && !model && isVerifiedLiveProcess(tool.processInfo)) {
-        // `codex --model x` runs x whatever config.toml says; a model value
-        // change seen in config.toml after the process started is a /model
-        // switch inside it.
-        const flagged = parseCodexCommandLineModel(tool.processInfo?.commandLine || tool.processInfo?.line);
+      if (tool.source === 'process' && isVerifiedLiveProcess(tool.processInfo)) {
+        // `codex --model x` / `-c model_reasoning_effort=xhigh` runs those
+        // overrides whatever config.toml says; a change seen in config.toml
+        // after the process started is a /model or /effort switch inside it.
+        const flagged = parseCodexCommandLine(tool.processInfo?.commandLine || tool.processInfo?.line);
         const startedAtMs = tool.processInfo?.createdAtMs || 0;
-        const configChangedSinceStart = Boolean(configured?.model && startedAtMs > 0 && configured.observedChangeAtMs > startedAtMs);
-        const picked = flagged && !configChangedSinceStart ? flagged : configured?.model;
-        if (picked) {
-          model = truncatePresenceText(picked);
+        if (!model) {
+          const configChangedSinceStart = Boolean(configured?.model && startedAtMs > 0 && configured.observedChangeAtMs > startedAtMs);
+          const picked = flagged.model && !configChangedSinceStart ? flagged.model : configured?.model;
+          if (picked) {
+            model = truncatePresenceText(picked);
+          }
+        }
+        if (!effort) {
+          const effortChangedSinceStart = Boolean(configured?.effort && startedAtMs > 0 && (configured.observedEffortChangeAtMs || 0) > startedAtMs);
+          const pickedEffort = flagged.effort && !effortChangedSinceStart ? flagged.effort : configured?.effort;
+          if (pickedEffort) {
+            effort = pickedEffort;
+          }
         }
       }
     }
   } else if (tool.family === 'grok') {
     if (tool.sessionId) {
       const summary = readGrokSessionSummaryModel(tool.sessionId, tool.cwd);
-      if (summary?.model && (!model || (updatedAtMs > 0 && summary.mtimeMs > updatedAtMs))) {
+      const summaryNewer = Boolean(summary && updatedAtMs > 0 && summary.mtimeMs > updatedAtMs);
+      if (summary?.model && (!model || summaryNewer)) {
         model = truncatePresenceText(summary.model);
+      }
+      if (summary?.effort && (!effort || summaryNewer)) {
+        effort = summary.effort;
       }
     } else if (!model && tool.source === 'process') {
       // No hook yet: ~/.grok/active_sessions.json binds this grok.exe to its session.
       const bound = readGrokProcessModel(tool.processInfo?.pid);
       if (bound?.model) {
         model = truncatePresenceText(bound.model);
+      }
+      if (!effort && bound?.effort) {
+        effort = bound.effort;
       }
     }
   } else if (tool.family === 'muse') {
@@ -758,20 +827,34 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
         model = truncatePresenceText(resolved);
       }
     }
+    if (model && !effort) {
+      effort = parseMuseCommandLineEffort(tool.processInfo?.commandLine || tool.processInfo?.line)
+        || readMuseSettingsEffort(model);
+    }
   } else if (tool.family === 'opencode') {
-    if (!model) {
-      model = readOpenCodeModel()?.model || null;
+    const oc = readOpenCodeModel();
+    if (!model && oc?.model) {
+      model = oc.model;
+    }
+    if (!effort && oc?.effort) {
+      effort = oc.effort;
     }
   } else if (tool.family === 'cursor' && tool.providerId === 'cursorApp') {
     // The Agent pick lives in the Cursor app's settings; the Cursor CLI
     // (cursor-agent) keeps its own and is not labelled from here.
-    if (!model) {
-      model = readCursorModel()?.model || null;
+    const cur = readCursorModel();
+    if (!model && cur?.model) {
+      model = cur.model;
+    }
+    if (!effort && cur?.effort) {
+      effort = cur.effort;
     }
   } else if (tool.family === 'antigravity' && tool.providerId === 'antigravityCli') {
     const cli = readAntigravityCliModel();
     if (cli?.model) {
+      const sameModel = Boolean(model && cli.model.toLowerCase() === model.toLowerCase());
       model = truncatePresenceText(cli.model);
+      effort = cli.effort ?? (sameModel ? effort : null);
     }
   } else if (tool.family === 'antigravity') {
     // The UI selection is written to antigravity_state.pbtxt the moment it
@@ -781,16 +864,19 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
     const active = readActiveAntigravityModel();
     if (active?.model) {
       model = truncatePresenceText(active.model);
+      effort = active.effort ?? null;
     } else if (placeholder) {
       // A current selection we cannot prove beats any older hook model.
       model = null;
+      effort = null;
     }
   } else if (tool.family === 't3') {
-    // The thread on screen names the model. A background thread that was never
-    // opened does not. Agent count is a second line, and only at 5 or more.
+    // The thread on screen names the model and effort. A background thread that
+    // was never opened does not. Agent count is a second line, and only at 5 or more.
     const snapshot = readT3Presence();
     if (snapshot?.model) {
       model = truncatePresenceText(snapshot.model);
+      effort = snapshot.effort ?? null;
       labelSurface = { family: 't3', providerId: snapshot.instanceId || undefined };
     }
     if (snapshot && snapshot.workingAgents >= T3_VISIBLE_AGENT_MINIMUM) {
@@ -798,9 +884,10 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
     }
   }
 
+  const formatted = model ? formatModelWithEffort(labelSurface, model, effort) : '';
   return {
     ...tool,
-    details: model ? truncatePresenceText(`Model: ${displayModelLabel(labelSurface, model)}`) : '',
+    details: formatted ? truncatePresenceText(`Model: ${formatted}`) : '',
     state
   };
 }
