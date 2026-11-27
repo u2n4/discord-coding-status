@@ -37,6 +37,10 @@ export function getCodexGlobalStateFilePath(): string {
   return path.join(getCodexHomeDirectory(), '.codex-global-state.json');
 }
 
+export function getCodexGlobalStateSqliteFilePath(): string {
+  return path.join(getCodexHomeDirectory(), '.codex-global-state.sqlite');
+}
+
 export function parseCodexConfigToml(content: string): CodexParsedSelection {
   let model: string | null = null;
   let effort: string | null = null;
@@ -351,7 +355,194 @@ export function parseCodexCommandLineModel(commandLine: string | null | undefine
   return parseCodexCommandLine(commandLine).model;
 }
 
-// Codex Desktop: the most recent composer pick in .codex-global-state.json.
+type SqliteModule = { DatabaseSync: new (file: string, options?: { readOnly?: boolean }) => any };
+let codexSqliteModule: SqliteModule | null | undefined;
+
+function loadCodexSqlite(): SqliteModule | null {
+  if (codexSqliteModule === undefined) {
+    try {
+      const getBuiltin = (process as unknown as { getBuiltinModule?: (id: string) => unknown }).getBuiltinModule;
+      codexSqliteModule = (typeof getBuiltin === 'function' ? getBuiltin.call(process, 'node:sqlite') as SqliteModule : null) || null;
+    } catch (_) {
+      codexSqliteModule = null;
+    }
+  }
+  return codexSqliteModule;
+}
+
+interface CachedCodexSqliteEntry {
+  signature: string;
+  model: string | null;
+  effort: string | null;
+  modelChangedAtMs: number;
+  effortChangedAtMs: number;
+  observedChangeAtMs: number;
+  observedEffortChangeAtMs: number;
+}
+
+const codexSqliteCache = new Map<string, CachedCodexSqliteEntry>();
+
+function sqliteFileStamp(filePath: string): { signature: string; mtimeMs: number } | null {
+  try {
+    const main = fs.statSync(filePath);
+    if (!Number.isFinite(main.mtimeMs)) {
+      return null;
+    }
+    let mtimeMs = main.mtimeMs;
+    let walPart = '';
+    try {
+      const wal = fs.statSync(`${filePath}-wal`);
+      if (Number.isFinite(wal.mtimeMs)) {
+        mtimeMs = Math.max(mtimeMs, wal.mtimeMs);
+        walPart = `${wal.mtimeMs}:${wal.size}`;
+      }
+    } catch (_) {}
+    return { signature: `${main.mtimeMs}:${main.size}|${walPart}`, mtimeMs };
+  } catch (_) {
+    return null;
+  }
+}
+
+function parseRecentConfigArrayJson(raw: unknown): CodexParsedSelection | null {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return readRecentConfigEntry({ 'composer-recent-model-configurations-v1': parsed });
+  } catch (_) {
+    return null;
+  }
+}
+
+export function readCodexGlobalStateSqlite(
+  filePath: string = getCodexGlobalStateSqliteFilePath()
+): CodexConfiguredModel | null {
+  const stamp = sqliteFileStamp(filePath);
+  if (!stamp) {
+    codexSqliteCache.delete(filePath);
+    return null;
+  }
+  const prev = codexSqliteCache.get(filePath);
+  if (prev && prev.signature === stamp.signature) {
+    return prev.model
+      ? {
+        model: prev.model,
+        effort: prev.effort,
+        mtimeMs: prev.modelChangedAtMs,
+        effortChangedAtMs: prev.effortChangedAtMs,
+        filePath,
+        observedChangeAtMs: prev.observedChangeAtMs,
+        observedEffortChangeAtMs: prev.observedEffortChangeAtMs
+      }
+      : null;
+  }
+
+  const sqlite = loadCodexSqlite();
+  if (!sqlite) {
+    return null;
+  }
+  let db: any = null;
+  let selection: CodexParsedSelection | null = null;
+  try {
+    db = new sqlite.DatabaseSync(filePath, { readOnly: true });
+    const ownerRow = db.prepare(
+      "SELECT value FROM settings WHERE scope = 'global' AND key = 'electron-renderer-content-owner' LIMIT 1"
+    ).get() as { value?: unknown } | undefined;
+    let owner = '';
+    if (typeof ownerRow?.value === 'string' && ownerRow.value.trim()) {
+      try {
+        const decoded = JSON.parse(ownerRow.value);
+        if (typeof decoded === 'string') {
+          owner = decoded.trim();
+        }
+      } catch (_) {
+        owner = ownerRow.value.trim().replace(/^"(.*)"$/, '$1');
+      }
+    }
+    if (owner) {
+      const ownedRow = db.prepare(
+        "SELECT value FROM settings WHERE scope = ? AND key = 'composer-recent-model-configurations-v1' LIMIT 1"
+      ).get(`electron-owner-atoms:${owner}`) as { value?: unknown } | undefined;
+      selection = parseRecentConfigArrayJson(ownedRow?.value);
+    }
+    if (!selection) {
+      const anyRow = db.prepare(
+        "SELECT value FROM settings WHERE key = 'composer-recent-model-configurations-v1' LIMIT 1"
+      ).get() as { value?: unknown } | undefined;
+      selection = parseRecentConfigArrayJson(anyRow?.value);
+    }
+  } catch (_) {
+    return null;
+  } finally {
+    try {
+      db?.close();
+    } catch (_) {}
+  }
+
+  const model = selection?.model || null;
+  const effort = selection?.effort || null;
+  const modelChangedAtMs = prev && prev.model === model ? prev.modelChangedAtMs : stamp.mtimeMs;
+  const effortChangedAtMs = prev && prev.effort === effort ? prev.effortChangedAtMs : stamp.mtimeMs;
+  const observedChangeAtMs = prev
+    ? (prev.model === model ? prev.observedChangeAtMs : stamp.mtimeMs)
+    : 0;
+  const observedEffortChangeAtMs = prev
+    ? (prev.effort === effort ? prev.observedEffortChangeAtMs : stamp.mtimeMs)
+    : 0;
+
+  codexSqliteCache.set(filePath, {
+    signature: stamp.signature,
+    model,
+    effort,
+    modelChangedAtMs,
+    effortChangedAtMs,
+    observedChangeAtMs,
+    observedEffortChangeAtMs
+  });
+
+  return model
+    ? {
+      model,
+      effort,
+      mtimeMs: modelChangedAtMs,
+      effortChangedAtMs,
+      filePath,
+      observedChangeAtMs,
+      observedEffortChangeAtMs
+    }
+    : null;
+}
+
+// Codex Desktop: current builds store state in .codex-global-state.sqlite and
+// write the live composer picker's model + model_reasoning_effort directly to
+// config.toml on every dropdown change (while composer-recent-model-configurations-v1
+// only updates when a turn is submitted). Legacy builds without the SQLite
+// store keep reading .codex-global-state.json directly.
 export function readCodexDesktopModel(): CodexConfiguredModel | null {
+  const sqliteFile = getCodexGlobalStateSqliteFilePath();
+  if (fs.existsSync(sqliteFile)) {
+    const sqliteState = readCodexGlobalStateSqlite(sqliteFile);
+    const configured = readCodexConfiguredModel();
+    if (configured?.model) {
+      const sqliteModelNewer = Boolean(
+        sqliteState?.model
+        && sqliteState.observedChangeAtMs > 0
+        && sqliteState.observedChangeAtMs > configured.mtimeMs
+      );
+      const sqliteEffortNewer = Boolean(
+        sqliteState?.model
+        && (sqliteState.observedEffortChangeAtMs || 0) > 0
+        && (sqliteState.observedEffortChangeAtMs || 0) > (configured.effortChangedAtMs || configured.mtimeMs)
+      );
+      if (sqliteModelNewer || sqliteEffortNewer) {
+        return sqliteState;
+      }
+      return configured;
+    }
+    if (sqliteState?.model) {
+      return sqliteState;
+    }
+  }
   return readCachedCodexModelFile(getCodexGlobalStateFilePath(), parseCodexGlobalState);
 }

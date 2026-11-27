@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ProcessInfo } from '../../core/tools/types';
+import { mergeEffortWithUltracode } from '../../core/presence/effort';
 
 // Claude Desktop keeps one record per Code-tab session in
 // claude-code-sessions/<account>/<organization>/local_<id>.json: the model it
@@ -119,9 +120,8 @@ function parseSession(file: string): ClaudeDesktopSession | null {
   const sessionSettings = record.sessionSettings && typeof record.sessionSettings === 'object'
     ? record.sessionSettings as { ultracode?: unknown }
     : null;
-  const rawEffort = sessionSettings?.ultracode === true
-    ? 'ultracode'
-    : (typeof record.effort === 'string' && record.effort.trim() ? record.effort.trim() : null);
+  const baseEffort = typeof record.effort === 'string' && record.effort.trim() ? record.effort.trim() : null;
+  const rawEffort = mergeEffortWithUltracode(baseEffort, sessionSettings?.ultracode === true);
   const focusedAtMs = Number(record.lastFocusedAt) || 0;
   const usedAtMs = Math.max(focusedAtMs, Number(record.latestUserFrameAt) || 0);
   return {

@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { mergeEffortWithUltracode } from './core/presence/effort';
 
 export const CLAUDE_MANAGED_HOOK_MARKER = '--managed-by=discord-coding-status';
 export const CLAUDE_LIFECYCLE_HOOK_EVENTS = [
@@ -178,15 +179,14 @@ function directEffortFromRecord(record: JsonRecord | null): string | null {
   if (!record) {
     return null;
   }
-  if (record.ultracode === true || record.ultracode === 'true') {
-    return 'ultracode';
-  }
+  const hasUltra = record.ultracode === true || record.ultracode === 'true';
   const raw = record.effort
     ?? record.effortLevel
     ?? record.effort_level
     ?? record.reasoning_effort
     ?? record.reasoningEffort;
-  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+  const base = typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+  return mergeEffortWithUltracode(base, hasUltra);
 }
 
 export function extractClaudeEffortFromHookInput(hookInput: unknown): string | null {
@@ -197,7 +197,8 @@ export function extractClaudeEffortFromHookInput(hookInput: unknown): string | n
 export function extractClaudeEffortFromTranscriptJsonl(jsonl: string): string | null {
   const lines = transcriptLines({ text: jsonl });
   let ultraActive = false;
-  let apiEffort: string | null = null;
+  let mainApiEffort: string | null = null;
+  let anyApiEffort: string | null = null;
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index].trim();
@@ -236,16 +237,17 @@ export function extractClaudeEffortFromTranscriptJsonl(jsonl: string): string | 
       const outputConfig = asRecord(params?.output_config);
       const raw = outputConfig?.effort ?? params?.effort;
       if (typeof raw === 'string' && raw.trim()) {
-        apiEffort = raw.trim();
-        // Ultracode sends `xhigh` underneath; a non-xhigh API call means effort moved off Ultracode.
-        if (ultraActive && apiEffort.toLowerCase() !== 'xhigh') {
-          ultraActive = false;
+        const trimmed = raw.trim();
+        anyApiEffort = trimmed;
+        const apiModel = typeof params?.model === 'string' ? params.model.trim().toLowerCase() : '';
+        if (!apiModel || !apiModel.startsWith('claude-haiku')) {
+          mainApiEffort = trimmed;
         }
       }
     }
   }
 
-  return ultraActive ? 'ultracode' : apiEffort;
+  return mergeEffortWithUltracode(mainApiEffort ?? anyApiEffort, ultraActive);
 }
 
 export function readClaudeTranscriptMetadata(

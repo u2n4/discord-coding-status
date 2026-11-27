@@ -53,6 +53,7 @@ import {
 } from './providers/antigravity/model';
 import { ensureAntigravityLiveLabels } from './providers/antigravity/live-labels';
 import { displayModelLabel, formatModelWithEffort } from './providers/model-label';
+import { mergeEffortWithUltracode } from './core/presence/effort';
 import { readT3Presence, T3_VISIBLE_AGENT_MINIMUM } from './providers/t3/model';
 import { DEFAULT_T3_IMAGE_KEY, DEFAULT_T3_NIGHTLY_IMAGE_KEY } from './providers/t3/provider';
 import { isT3NightlyProcess } from './core/detection/tool-detection';
@@ -522,11 +523,13 @@ export function readDesktopHostedClaudeModel(desktopPid: number, processes: Proc
       || inUse.model
       || (runner ? runnerFlag(String(runner.commandLine || ''), 'model') : null);
     const runnerEffort = runner ? parseClaudeCommandLineEffort(String(runner.commandLine || '')) : null;
-    // Ultracode runs `xhigh` underneath, so Desktop's `sessionSettings.ultracode`
-    // stays authoritative when the hook only reports `xhigh`.
+    // Ultracode is an independent toggle in Claude Desktop (`sessionSettings.ultracode`,
+    // explicitly set to `false` when disabled) that can pair with high/xhigh/max,
+    // so Desktop's active ultracode state combines with any active effort tier.
     const hookEffort = freshHook?.effort || null;
-    const effort = inUse.effort === 'ultracode' && (!hookEffort || hookEffort.toLowerCase() === 'xhigh')
-      ? 'ultracode'
+    const desktopHasUltra = Boolean(inUse.effort && /ultracode/i.test(inUse.effort));
+    const effort = desktopHasUltra
+      ? mergeEffortWithUltracode(hookEffort || inUse.effort || runnerEffort, true)
       : (hookEffort || inUse.effort || runnerEffort || null);
     return model ? truncatePresenceText(formatModelWithEffort('claude', model, effort)) : null;
   }
@@ -683,10 +686,8 @@ function parseClaudeCommandLineEffort(commandLine: string | null | undefined): s
   if (typeof commandLine !== 'string' || !commandLine.trim()) {
     return null;
   }
-  if (/(?:^|\s)--ultracode(?:\s|$|=true)/i.test(commandLine)) {
-    return 'ultracode';
-  }
-  return runnerFlag(commandLine, 'effort');
+  const hasUltra = /(?:^|\s)--ultracode(?:\s|$|=true)/i.test(commandLine);
+  return mergeEffortWithUltracode(runnerFlag(commandLine, 'effort'), hasUltra);
 }
 
 function parseMuseCommandLineEffort(commandLine: string | null | undefined): string | null {

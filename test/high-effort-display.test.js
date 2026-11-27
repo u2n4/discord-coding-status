@@ -106,17 +106,30 @@ test('displayEffortLabel shows only XHigh, Max, and Ultracode and hides all othe
   for (const input of ['ultracode', 'ULTRACODE', 'ultra-code', 'ultra_code', 'Ultra Code']) {
     assert.equal(displayEffortLabel(input), 'Ultracode', `expected Ultracode for ${input}`);
   }
+  for (const input of ['ultra', 'ULTRA', 'Ultra']) {
+    assert.equal(displayEffortLabel(input), 'Ultra', `expected Ultra for ${input}`);
+  }
   for (const input of ['xhigh', 'XHigh', 'x-high', 'x_high', 'extra high', 'Extra-High', 'extra_high', 'Extra']) {
     assert.equal(displayEffortLabel(input), 'XHigh', `expected XHigh for ${input}`);
   }
   for (const input of ['max', 'MAX', 'Max', 'max effort', 'max-effort', 'max_effort']) {
     assert.equal(displayEffortLabel(input), 'Max', `expected Max for ${input}`);
   }
+  for (const input of ['Max · Ultracode', 'max+ultracode', 'max, ultracode', 'Ultracode · Max', 'Max Ultracode']) {
+    assert.equal(displayEffortLabel(input), 'Max · Ultracode', `expected Max · Ultracode for ${input}`);
+  }
+  for (const input of ['XHigh · Ultracode', 'xhigh+ultracode', 'Extra · Ultracode', 'Extra High · Ultracode', 'Extra Ultracode']) {
+    assert.equal(displayEffortLabel(input), 'XHigh · Ultracode', `expected XHigh · Ultracode for ${input}`);
+  }
+  for (const input of ['High · Ultracode', 'Medium · Ultracode', 'Low · Ultracode', 'High Ultracode']) {
+    assert.equal(displayEffortLabel(input), 'Ultracode', `expected Ultracode for ${input}`);
+  }
 
   for (const hidden of [
     '', ' ', null, undefined, 42, true,
     'none', 'minimal', 'low', 'medium', 'high', 'standard', 'extended',
-    'auto', 'default', 'thinking', 'ultrathink', 'ultra', 'fast', 'xlow'
+    'auto', 'default', 'thinking', 'ultrathink', 'fast', 'xlow',
+    '1M', 'Preview', 'random max words'
   ]) {
     assert.equal(displayEffortLabel(hidden), null, `expected null for ${String(hidden)}`);
   }
@@ -210,7 +223,7 @@ test('T3 Code shows XHigh, Max, and Ultracode from SQLite options, hides lower t
     assert.equal(enriched.details, 'Model: Gemini 4 Neon (XHigh)');
     assert.equal(enriched.state, '');
 
-    // Claude ultracode boolean overrides effort = xhigh + 5 active agents stay in state
+    // Claude ultracode boolean combines with visible effort (xhigh/max) + 5 active agents stay in state
     db.prepare('INSERT INTO orchestration_v2_projection_nodes (thread_id, kind, status) VALUES (?, ?, ?)').run('t1', 'root_turn', 'running');
     for (let i = 0; i < 4; i += 1) {
       db.prepare('INSERT INTO orchestration_v2_projection_nodes (thread_id, kind, status) VALUES (?, ?, ?)').run(`worker-${i}`, 'root_turn', 'running');
@@ -221,14 +234,27 @@ test('T3 Code shows XHigh, Max, and Ultracode from SQLite options, hides lower t
       options: [{ id: 'effort', value: 'xhigh' }, { id: 'ultracode', value: true }]
     }, '2026-11-27T01:01:00.000Z', 4);
     enriched = await enrichToolForPresence(t3Tool);
-    assert.equal(enriched.details, 'Model: Opus 5.5 (Ultracode)');
+    assert.equal(enriched.details, 'Model: Opus 5.5 (XHigh · Ultracode)');
     assert.equal(enriched.state, '5 agents');
 
-    // Codex reasoningEffort = max
+    // Claude ultracode + high hides high and shows only (Ultracode)
+    setThread({
+      instanceId: 'claudeAgent',
+      model: 'claude-opus-5-5',
+      options: [{ id: 'effort', value: 'high' }, { id: 'ultracode', value: true }]
+    }, '2026-11-27T01:01:30.000Z', 4);
+    enriched = await enrichToolForPresence(t3Tool);
+    assert.equal(enriched.details, 'Model: Opus 5.5 (Ultracode)');
+
+    // Codex reasoningEffort = max & ultra
     db.prepare('DELETE FROM orchestration_v2_projection_nodes').run();
     setThread({ instanceId: 'codex', model: 'gpt-6.2-sol', options: [{ id: 'reasoningEffort', value: 'max' }] }, '2026-11-27T01:02:00.000Z');
     enriched = await enrichToolForPresence(t3Tool);
     assert.equal(enriched.details, 'Model: GPT-6.2 Sol (Max)');
+
+    setThread({ instanceId: 'codex', model: 'gpt-6.2-sol', options: [{ id: 'reasoningEffort', value: 'ultra' }] }, '2026-11-27T01:02:30.000Z');
+    enriched = await enrichToolForPresence(t3Tool);
+    assert.equal(enriched.details, 'Model: GPT-6.2 Sol (Ultra)');
 
     // Lower effort hidden
     setThread({ instanceId: 'codex', model: 'gpt-6.2-sol', options: [{ id: 'reasoningEffort', value: 'high' }] }, '2026-11-27T01:03:00.000Z');
@@ -327,9 +353,9 @@ test('T3 Code shows XHigh, Max, and Ultracode from SQLite options, hides lower t
     writeDraft({ effort: 'high' }, 1000);
     // First observation seeds the baseline; second observation with changed effort activates draft focus.
     readT3Presence();
-    writeDraft({ effort: 'xhigh', ultracode: true }, 4000);
+    writeDraft({ effort: 'max', ultracode: true }, 4000);
     enriched = await enrichToolForPresence(t3Tool);
-    assert.equal(enriched.details, 'Model: Opus 5.5 (Ultracode)');
+    assert.equal(enriched.details, 'Model: Opus 5.5 (Max · Ultracode)');
 
     writeDraft({ effort: 'medium', ultracode: false }, 8000);
     enriched = await enrichToolForPresence(t3Tool);
@@ -485,6 +511,48 @@ test('Codex Desktop reads model and effort from the active electron-renderer-con
   writeGlobalState('high', 8000);
   enriched = await enrichToolForPresence(tool);
   assert.equal(enriched.details, 'Model: GPT-6.2 Sol');
+
+  // Modern Codex Desktop: .codex-global-state.sqlite + live config.toml updates (ultra/max/xhigh)
+  if (hasSqlite) {
+    const { DatabaseSync } = require('node:sqlite');
+    const sqliteFile = path.join(ENV_OVERRIDES.CODEX_HOME, '.codex-global-state.sqlite');
+    const configPath = path.join(ENV_OVERRIDES.CODEX_HOME, 'config.toml');
+    const db = new DatabaseSync(sqliteFile);
+    try {
+      db.exec('CREATE TABLE settings (scope TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (scope, key)) WITHOUT ROWID;');
+      db.prepare('INSERT INTO settings (scope, key, value) VALUES (?, ?, ?)').run('global', 'electron-renderer-content-owner', JSON.stringify('owner-new'));
+      db.prepare('INSERT INTO settings (scope, key, value) VALUES (?, ?, ?)').run(
+        'electron-owner-atoms:owner-new',
+        'composer-recent-model-configurations-v1',
+        JSON.stringify([{ model: 'gpt-6.2-sol', reasoningEffort: 'xhigh', serviceTier: null }])
+      );
+    } finally {
+      db.close();
+    }
+
+    // Without config.toml, falls back to SQLite's active owner configuration
+    fs.rmSync(configPath, { force: true });
+    enriched = await enrichToolForPresence(tool);
+    assert.equal(enriched.details, 'Model: GPT-6.2 Sol (XHigh)');
+
+    // When Codex Desktop writes the live composer pick to config.toml (Ultra / Max / XHigh / High)
+    writeText(configPath, 'model = "gpt-6.2-sol"\nmodel_reasoning_effort = "ultra"\n');
+    bumpMtime(configPath, 10000);
+    enriched = await enrichToolForPresence(tool);
+    assert.equal(enriched.details, 'Model: GPT-6.2 Sol (Ultra)');
+
+    writeText(configPath, 'model = "gpt-6.2-sol"\nmodel_reasoning_effort = "max"\n');
+    bumpMtime(configPath, 12000);
+    enriched = await enrichToolForPresence(tool);
+    assert.equal(enriched.details, 'Model: GPT-6.2 Sol (Max)');
+
+    writeText(configPath, 'model = "gpt-6.2-sol"\nmodel_reasoning_effort = "high"\n');
+    bumpMtime(configPath, 14000);
+    enriched = await enrichToolForPresence(tool);
+    assert.equal(enriched.details, 'Model: GPT-6.2 Sol');
+
+    fs.rmSync(sqliteFile, { force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -492,27 +560,43 @@ test('Codex Desktop reads model and effort from the active electron-renderer-con
 // ---------------------------------------------------------------------------
 
 test('Claude Code transcript tracks ultra_effort_enter/exit and api-request output_config.effort', () => {
-  assert.equal(extractClaudeEffortFromHookInput({ ultracode: true, effort: 'xhigh' }), 'ultracode');
+  assert.equal(extractClaudeEffortFromHookInput({ ultracode: true, effort: 'xhigh' }), 'XHigh · Ultracode');
+  assert.equal(extractClaudeEffortFromHookInput({ ultracode: true, effort: 'max' }), 'Max · Ultracode');
+  assert.equal(extractClaudeEffortFromHookInput({ ultracode: true, effort: 'high' }), 'Ultracode');
   assert.equal(extractClaudeEffortFromHookInput({ effortLevel: 'max' }), 'max');
 
   const enteredUltra = [
     JSON.stringify({ type: 'attachment', attachment: { type: 'ultra_effort_enter' } }),
-    JSON.stringify({ type: 'api-request', params: { output_config: { effort: 'xhigh' } } })
+    JSON.stringify({ type: 'api-request', params: { model: 'claude-opus-5-5', output_config: { effort: 'xhigh' } } })
   ].join('\n');
-  assert.equal(extractClaudeEffortFromTranscriptJsonl(enteredUltra), 'ultracode');
+  assert.equal(extractClaudeEffortFromTranscriptJsonl(enteredUltra), 'XHigh · Ultracode');
 
   const exitedUltra = [
     enteredUltra,
     JSON.stringify({ type: 'attachment', attachment: { type: 'ultra_effort_exit' } }),
-    JSON.stringify({ type: 'api-request', params: { output_config: { effort: 'xhigh' } } })
+    JSON.stringify({ type: 'api-request', params: { model: 'claude-opus-5-5', output_config: { effort: 'xhigh' } } })
   ].join('\n');
   assert.equal(extractClaudeEffortFromTranscriptJsonl(exitedUltra), 'xhigh');
 
-  const movedToHigh = [
-    enteredUltra,
-    JSON.stringify({ type: 'api-request', params: { output_config: { effort: 'high' } } })
+  const haikuDuringUltra = [
+    JSON.stringify({ type: 'attachment', attachment: { type: 'ultra_effort_enter' } }),
+    JSON.stringify({ type: 'api-request', params: { model: 'claude-fable-5-2', output_config: { effort: 'max' } } }),
+    JSON.stringify({ type: 'api-request', params: { model: 'claude-haiku-5-5', output_config: { effort: 'medium' } } })
   ].join('\n');
-  assert.equal(extractClaudeEffortFromTranscriptJsonl(movedToHigh), 'high');
+  assert.equal(extractClaudeEffortFromTranscriptJsonl(haikuDuringUltra), 'Max · Ultracode');
+
+  const highWithUltra = [
+    JSON.stringify({ type: 'attachment', attachment: { type: 'ultra_effort_enter' } }),
+    JSON.stringify({ type: 'api-request', params: { model: 'claude-fable-5-2', output_config: { effort: 'high' } } })
+  ].join('\n');
+  assert.equal(extractClaudeEffortFromTranscriptJsonl(highWithUltra), 'Ultracode');
+
+  const exitedToHigh = [
+    haikuDuringUltra,
+    JSON.stringify({ type: 'attachment', attachment: { type: 'ultra_effort_exit' } }),
+    JSON.stringify({ type: 'api-request', params: { model: 'claude-fable-5-2', output_config: { effort: 'high' } } })
+  ].join('\n');
+  assert.equal(extractClaudeEffortFromTranscriptJsonl(exitedToHigh), 'high');
 
   const maxRequest = JSON.stringify({ type: 'api-request', params: { output_config: { effort: 'max' } } });
   assert.equal(extractClaudeEffortFromTranscriptJsonl(maxRequest), 'max');
@@ -536,7 +620,7 @@ test('Claude Code CLI hook, CLI flags, and settings.json effortLevel format visi
 
   const stored = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
   assert.equal(stored.sessions['claude-s1'].model, 'claude-opus-5-5');
-  assert.equal(stored.sessions['claude-s1'].effort, 'ultracode');
+  assert.equal(stored.sessions['claude-s1'].effort, 'XHigh · Ultracode');
 
   // Direct process CLI flags
   const claudeCliTool = (overrides = {}) => ({
@@ -560,6 +644,11 @@ test('Claude Code CLI hook, CLI flags, and settings.json effortLevel format visi
   }));
   assert.equal(enriched.details, 'Model: Opus 5.5 (Ultracode)');
 
+  enriched = await enrichToolForPresence(claudeCliTool({
+    processInfo: liveProcessInfo({ commandLine: 'claude --effort max --ultracode', line: 'claude --effort max --ultracode' })
+  }));
+  assert.equal(enriched.details, 'Model: Opus 5.5 (Max · Ultracode)');
+
   // settings.json fallback when no hook/flag effort is provided
   const settingsFile = path.join(ENV_OVERRIDES.CLAUDE_CONFIG_DIR, 'settings.json');
   writeJson(settingsFile, { effortLevel: 'xhigh' });
@@ -580,7 +669,12 @@ test('Claude Code CLI hook, CLI flags, and settings.json effortLevel format visi
 test('Claude Desktop parses UIA button effort and background local_*.json sessions', async () => {
   assert.equal(parseClaudeDesktopButtonEffort('Model: Opus 5.5 Extra', 'Opus 5.5'), 'XHigh');
   assert.equal(parseClaudeDesktopButtonEffort('Model: Opus 5.5 Max', 'Opus 5.5'), 'Max');
+  assert.equal(parseClaudeDesktopButtonEffort('Model: Fable 5.2 Max', 'Fable 5.2'), 'Max');
   assert.equal(parseClaudeDesktopButtonEffort('Model: Opus 5.5 Ultracode', 'Opus 5.5'), 'Ultracode');
+  assert.equal(parseClaudeDesktopButtonEffort('Model: Fable 5.2 Max · Ultracode', 'Fable 5.2'), 'Max · Ultracode');
+  assert.equal(parseClaudeDesktopButtonEffort('Model: Fable 5.2 High · Ultracode', 'Fable 5.2'), 'Ultracode');
+  assert.equal(parseClaudeDesktopButtonEffort('Model: Opus 5.5 Extra · Ultracode', 'Opus 5.5'), 'XHigh · Ultracode');
+  assert.equal(parseClaudeDesktopButtonEffort('Model: Fable 5.2 Max Ultracode', 'Fable 5.2'), 'Max · Ultracode');
   assert.equal(parseClaudeDesktopButtonEffort('Model: Opus 5.5 High', 'Opus 5.5'), null);
   assert.equal(parseClaudeDesktopButtonEffort('Model: Opus 5.5', 'Opus 5.5'), null);
   assert.equal(parseClaudeDesktopButtonEffort('Model: Sonnet 5.5 Extra', 'Opus 5.5'), null);
@@ -600,10 +694,16 @@ test('Claude Desktop parses UIA button effort and background local_*.json sessio
   const [withUltra] = applyClaudeDesktopDisplayOverride(baseTools, { kind: 'model', model: 'Opus 5.5', effort: 'ultracode' });
   assert.equal(withUltra.details, 'Model: Opus 5.5 (Ultracode)');
 
+  const [withMaxUltra] = applyClaudeDesktopDisplayOverride(baseTools, { kind: 'model', model: 'Fable 5.2', effort: 'Max+Ultracode' });
+  assert.equal(withMaxUltra.details, 'Model: Fable 5.2 (Max · Ultracode)');
+
+  const [withXHighUltra] = applyClaudeDesktopDisplayOverride(baseTools, { kind: 'model', model: 'Opus 5.5', effort: 'XHigh+Ultracode' });
+  assert.equal(withXHighUltra.details, 'Model: Opus 5.5 (XHigh · Ultracode)');
+
   const [withHigh] = applyClaudeDesktopDisplayOverride(baseTools, { kind: 'model', model: 'Opus 5.5', effort: 'high' });
   assert.equal(withHigh.details, 'Model: Opus 5.5');
 
-  // Background Code-tab session file: sessionSettings.ultracode wins over effort: 'xhigh'
+  // Background Code-tab session file: sessionSettings.ultracode combines with visible effort and hides lower effort
   const sessionsRoot = ENV_OVERRIDES.DISCORD_CODING_STATUS_CLAUDE_DESKTOP_SESSIONS;
   const sessionFile = path.join(sessionsRoot, 'acct', 'org', 'local_1.json');
   const writeSession = (record, offsetMs) => {
@@ -622,14 +722,14 @@ test('Claude Desktop parses UIA button effort and background local_*.json sessio
 
   writeSession({
     cliSessionId: 'sess-desktop-1',
-    model: 'claude-opus-5-5',
-    effort: 'xhigh',
+    model: 'claude-fable-5-2',
+    effort: 'high',
     sessionSettings: { ultracode: true },
     lastFocusedAt: 2000
   }, 1000);
 
-  const picked = readLastUsedClaudeDesktopSession(9001, [hostProcess, runnerProcess]);
-  assert.equal(picked?.effort, 'ultracode');
+  let picked = readLastUsedClaudeDesktopSession(9001, [hostProcess, runnerProcess]);
+  assert.equal(picked?.effort, 'Ultracode');
 
   let enriched = await enrichToolForPresence({
     key: 'process:claudeApp',
@@ -641,7 +741,28 @@ test('Claude Desktop parses UIA button effort and background local_*.json sessio
     state: '',
     processInfo: hostProcess
   });
-  assert.equal(enriched.details, 'Model: Opus 5.5 (Ultracode)');
+  assert.equal(enriched.details, 'Model: Fable 5.2 (Ultracode)');
+
+  writeSession({
+    cliSessionId: 'sess-desktop-1',
+    model: 'claude-fable-5-2',
+    effort: 'max',
+    sessionSettings: { ultracode: true },
+    lastFocusedAt: 2500
+  }, 2500);
+  picked = readLastUsedClaudeDesktopSession(9001, [hostProcess, runnerProcess]);
+  assert.equal(picked?.effort, 'Max · Ultracode');
+  enriched = await enrichToolForPresence({
+    key: 'process:claudeApp',
+    providerId: 'claudeApp',
+    family: 'claude',
+    source: 'process',
+    model: null,
+    details: '',
+    state: '',
+    processInfo: hostProcess
+  });
+  assert.equal(enriched.details, 'Model: Fable 5.2 (Max · Ultracode)');
 
   writeSession({
     cliSessionId: 'sess-desktop-1',

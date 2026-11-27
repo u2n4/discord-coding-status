@@ -92,9 +92,14 @@ export function parseClaudeDesktopModelChildLabel(
 }
 
 // Reads the effort suffix ONLY when the button's Name starts with
-// `Model: <firstChildLabel> <suffix>` and `<suffix>` is one of the three
-// visible effort tiers (Extra/XHigh, Max, Ultracode). Any mismatch or lower
-// tier fails closed to null.
+// `Model: <firstChildLabel> <suffix>` and `<suffix>` contains one of the three
+// visible effort tiers (Ultracode > Extra/XHigh > Max), including combined
+// labels like "Model: Fable 5.2 Max · Ultracode" or "Model: Fable 5.2 High · Ultracode".
+// Any mismatch or lower-only tier fails closed to null.
+const DESKTOP_EFFORT_ULTRACODE = /(?:^|[^a-z0-9])(?:ultracode|ultra\s+code)(?:$|[^a-z0-9])/i;
+const DESKTOP_EFFORT_XHIGH = /(?:^|[^a-z0-9])(?:extra(?:\s+high)?|xhigh|x-high)(?:$|[^a-z0-9])/i;
+const DESKTOP_EFFORT_MAX = /(?:^|[^a-z0-9])max(?:\s+effort)?(?:$|[^a-z0-9])/i;
+
 export function parseClaudeDesktopButtonEffort(
   buttonName: unknown,
   modelChildLabel: unknown
@@ -111,7 +116,14 @@ export function parseClaudeDesktopButtonEffort(
   if (!rest) {
     return null;
   }
-  return displayEffortLabel(rest);
+  const hasUltra = DESKTOP_EFFORT_ULTRACODE.test(rest);
+  const base: 'XHigh' | 'Max' | null = DESKTOP_EFFORT_XHIGH.test(rest)
+    ? 'XHigh'
+    : (DESKTOP_EFFORT_MAX.test(rest) ? 'Max' : null);
+  if (hasUltra) {
+    return base ? `${base} · Ultracode` : 'Ultracode';
+  }
+  return base ?? displayEffortLabel(rest);
 }
 
 export function selectClaudeDesktopModel(

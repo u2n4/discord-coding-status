@@ -3,6 +3,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { mergeEffortWithUltracode } from '../../core/presence/effort';
 
 // T3 Code keeps the thread the user is looking at in ~/.t3/userdata/statev2.sqlite
 // (orchestration_v2_projection_threads.payload_json modelSelection + lastVisitedAt)
@@ -345,6 +346,7 @@ export function extractT3OptionEffort(options: unknown, fallbackRecord?: Record<
     }
   }
   let effort: string | null = null;
+  let hasUltracode = false;
   if (Array.isArray(parsed)) {
     for (const item of parsed) {
       if (!item || typeof item !== 'object') {
@@ -353,16 +355,15 @@ export function extractT3OptionEffort(options: unknown, fallbackRecord?: Record<
       const entry = item as { id?: unknown; value?: unknown };
       const id = typeof entry.id === 'string' ? entry.id.trim().toLowerCase() : '';
       if (id === 'ultracode' && (entry.value === true || entry.value === 'true')) {
-        return 'ultracode';
-      }
-      if (T3_EFFORT_OPTION_IDS.has(id) && typeof entry.value === 'string' && entry.value.trim()) {
+        hasUltracode = true;
+      } else if (T3_EFFORT_OPTION_IDS.has(id) && typeof entry.value === 'string' && entry.value.trim()) {
         effort = entry.value.trim();
       }
     }
   } else if (parsed && typeof parsed === 'object') {
     const obj = parsed as Record<string, unknown>;
     if (obj.ultracode === true || obj.ultracode === 'true') {
-      return 'ultracode';
+      hasUltracode = true;
     }
     for (const [rawKey, rawValue] of Object.entries(obj)) {
       if (T3_EFFORT_OPTION_IDS.has(rawKey.trim().toLowerCase()) && typeof rawValue === 'string' && rawValue.trim()) {
@@ -370,19 +371,15 @@ export function extractT3OptionEffort(options: unknown, fallbackRecord?: Record<
       }
     }
   }
-  if (effort) {
-    return effort;
-  }
   if (fallbackRecord) {
     if (fallbackRecord.ultracode === true || fallbackRecord.ultracode === 1 || fallbackRecord.ultracode === 'true') {
-      return 'ultracode';
+      hasUltracode = true;
     }
-    const direct = asText(fallbackRecord.effort) || asText(fallbackRecord.reasoningEffort);
-    if (direct) {
-      return direct;
+    if (!effort) {
+      effort = asText(fallbackRecord.effort) || asText(fallbackRecord.reasoningEffort);
     }
   }
-  return null;
+  return mergeEffortWithUltracode(effort, hasUltracode);
 }
 
 function readSnapshot(db: { prepare: (sql: string) => { get: () => any }; close: () => void }): T3DatabaseSnapshot {

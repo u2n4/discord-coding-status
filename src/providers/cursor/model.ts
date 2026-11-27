@@ -3,6 +3,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { cursorStateDbPath } from './quota';
+import { mergeEffortWithUltracode } from '../../core/presence/effort';
 
 // Cursor keeps its settings in User/globalStorage/state.vscdb (SQLite). The
 // applicationUser blob holds both the Agent chat pick
@@ -78,28 +79,26 @@ export function parseCursorApplicationUserSelection(json: unknown): CursorParsed
   // Effort lives in `composer.selectedModels[i].parameters` as `{ id: "effort", value }`.
   // `maxMode` is Cursor's 1M-context toggle (independent of effort) and is never read here.
   let effort: string | null = null;
+  let hasUltracode = false;
   const selectedModels = Array.isArray(composer?.selectedModels) ? composer.selectedModels : [];
   const selected = selectedModels.find((candidate) => candidate?.modelId === id) || selectedModels[0];
   const parameters = Array.isArray(selected?.parameters) ? selected.parameters : [];
   for (const param of parameters) {
     const paramId = typeof param?.id === 'string' ? param.id.trim().toLowerCase() : '';
     if (paramId === 'ultracode' && (param?.value === true || param?.value === 'true')) {
-      effort = 'ultracode';
-      break;
-    }
-    if ((paramId === 'effort' || paramId === 'reasoningeffort' || paramId === 'reasoning_effort')
+      hasUltracode = true;
+    } else if ((paramId === 'effort' || paramId === 'reasoningeffort' || paramId === 'reasoning_effort')
       && typeof param?.value === 'string' && param.value.trim()) {
       effort = param.value.trim();
     }
   }
-  if (!effort) {
-    if (/(?:^|-)ultracode(?:$|-fast$)/i.test(id)) {
-      effort = 'ultracode';
-    } else if (/(?:^|-)xhigh(?:$|-fast$)/i.test(id)) {
-      effort = 'xhigh';
-    }
+  if (!hasUltracode && /(?:^|-)ultracode(?:$|-fast$)/i.test(id)) {
+    hasUltracode = true;
   }
-  return { model, effort };
+  if (!effort && /(?:^|-)xhigh(?:$|-fast$)/i.test(id)) {
+    effort = 'xhigh';
+  }
+  return { model, effort: mergeEffortWithUltracode(effort, hasUltracode) };
 }
 
 export function parseCursorApplicationUser(json: unknown): string | null {

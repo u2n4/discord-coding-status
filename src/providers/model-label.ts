@@ -19,8 +19,9 @@ export { displayEffortLabel, type VisibleEffortLabel };
 const CLAUDE_ID = /^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:-[a-z0-9@-]+)?(?:\[[^\]]*\])?$/i;
 const GEMINI_ID = /^gemini-(\d+(?:\.\d+)?)-([a-z]+)(?:-[a-z0-9@.-]+)?$/i;
 const GPT_OSS_ID = /^gpt-oss-(\d+b)(?:-[a-z]+)?$/i;
-const EFFORT_SUFFIX = /\s*\((?:minimal|low|medium|high|extra\s*high|extra|max|xhigh|x-high|thinking|ultracode|ultrathink)\)\s*$/i;
-const PAREN_EFFORT = /\(([^()]{1,24})\)\s*$/;
+const EFFORT_ATOM = '(?:minimal|low|medium|high|extra\\s*high|extra|max|xhigh|x-high|thinking|ultra|ultracode|ultrathink)';
+const EFFORT_SUFFIX = new RegExp(`\\s*\\(${EFFORT_ATOM}(?:\\s*[·•,+/|]\\s*${EFFORT_ATOM})?\\)\\s*$`, 'i');
+const PAREN_EFFORT = /\(([^()]{1,36})\)\s*$/;
 const MUSE_ID = /^(?:meta\.)?muse-([a-z]+)-(\d+(?:\.\d+)?)(?:-[a-z]+)?$/i;
 
 export function extractEffortFromModelLabel(value: unknown): string | null {
