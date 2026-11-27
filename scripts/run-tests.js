@@ -34,6 +34,7 @@ const result = spawnSync(
       // label the processes tests fabricate; tests that need them set their own.
       DISCORD_CODING_STATUS_OPENCODE_STATE: path.join(labelCacheDir, 'opencode-model.json'),
       DISCORD_CODING_STATUS_CURSOR_STATE_DB: path.join(labelCacheDir, 'cursor-state.vscdb'),
+      DISCORD_CODING_STATUS_SKIP_TOOL_HOOKS: 'false',
       XDG_DATA_HOME: path.join(labelCacheDir, 'xdg-data'),
     },
   },

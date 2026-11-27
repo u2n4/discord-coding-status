@@ -18,17 +18,23 @@ import { mergeEffortWithUltracode } from '../../core/presence/effort';
 // key `t3code:composer-drafts:v1`, written at once to the LevelDB log under
 // <userData>/Local Storage/leveldb. Only the model fields are kept from it.
 
-export const T3_VISIBLE_AGENT_MINIMUM = 5;
+export const T3_VISIBLE_AGENT_MINIMUM = 3;
 
 const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,120}$/;
 const WORKING_STATUSES = ['pending', 'preparing', 'queued', 'starting', 'running'] as const;
 const EFFORT_SUFFIX = /\s*\((?:minimal|low|medium|high|xhigh|extra high|max|thinking)\)\s*$/i;
+
+export interface T3WorkingAgent {
+  model: string | null;
+  instanceId: string | null;
+}
 
 export interface T3PresenceSnapshot {
   model: string | null;
   effort?: string | null;
   instanceId: string | null;
   workingAgents: number;
+  workingAgentModels?: T3WorkingAgent[];
 }
 
 type SqliteModule = { DatabaseSync: new (file: string, options?: { readOnly?: boolean }) => any };
@@ -246,16 +252,78 @@ const STATUS_LIST = WORKING_STATUSES.map((status) => `'${status}'`).join(',');
 
 // Matches T3's partial covering index `orchestration_v2_projection_runs_recovery_idx`
 // (`WHERE status IN ('queued','preparing','starting','running','waiting')`), so
-// active-agent counting is an index lookup (~0.1ms) instead of a full scan of
+// active-agent discovery is an index lookup (~0.1ms) instead of a full scan of
 // `orchestration_v2_projection_nodes` (~50ms on large databases).
-const RUNS_AGENT_SQL = `
-  SELECT COUNT(DISTINCT r.thread_id) AS total
+const RUNS_AGENTS_FULL_SQL = `
+  SELECT
+    r.thread_id AS thread_id,
+    COALESCE(
+      CASE WHEN json_valid(r.payload_json) AND typeof(json_extract(r.payload_json, '$.modelSelection.model')) = 'text'
+           THEN json_extract(r.payload_json, '$.modelSelection.model') END,
+      CASE WHEN json_valid(t.payload_json) AND typeof(json_extract(t.payload_json, '$.modelSelection.model')) = 'text'
+           THEN json_extract(t.payload_json, '$.modelSelection.model') END
+    ) AS model,
+    COALESCE(
+      CASE WHEN json_valid(r.payload_json) AND typeof(json_extract(r.payload_json, '$.modelSelection.instanceId')) = 'text'
+           THEN json_extract(r.payload_json, '$.modelSelection.instanceId') END,
+      r.provider_instance_id,
+      r.provider,
+      CASE WHEN json_valid(t.payload_json) AND typeof(json_extract(t.payload_json, '$.modelSelection.instanceId')) = 'text'
+           THEN json_extract(t.payload_json, '$.modelSelection.instanceId') END
+    ) AS instance_id
   FROM orchestration_v2_projection_runs r
   INNER JOIN orchestration_v2_projection_threads t ON t.thread_id = r.thread_id
   WHERE r.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
     AND r.status <> 'waiting'
     AND t.deleted_at IS NULL
     AND t.archived_at IS NULL
+  ORDER BY
+    CASE r.status WHEN 'running' THEN 0 WHEN 'starting' THEN 1 WHEN 'preparing' THEN 2 ELSE 3 END,
+    r.ordinal DESC
+`;
+
+const RUNS_AGENTS_BASIC_SQL = `
+  SELECT DISTINCT
+    r.thread_id AS thread_id,
+    CASE WHEN json_valid(t.payload_json) AND typeof(json_extract(t.payload_json, '$.modelSelection.model')) = 'text'
+         THEN json_extract(t.payload_json, '$.modelSelection.model') END AS model,
+    CASE WHEN json_valid(t.payload_json) AND typeof(json_extract(t.payload_json, '$.modelSelection.instanceId')) = 'text'
+         THEN json_extract(t.payload_json, '$.modelSelection.instanceId') END AS instance_id
+  FROM orchestration_v2_projection_runs r
+  INNER JOIN orchestration_v2_projection_threads t ON t.thread_id = r.thread_id
+  WHERE r.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+    AND r.status <> 'waiting'
+    AND t.deleted_at IS NULL
+    AND t.archived_at IS NULL
+`;
+
+const SUBAGENT_RUNS_FULL_SQL = `
+  SELECT
+    COALESCE(
+      CASE WHEN json_valid(s.payload_json) AND typeof(json_extract(s.payload_json, '$.modelSelection.model')) = 'text'
+           THEN json_extract(s.payload_json, '$.modelSelection.model') END,
+      CASE WHEN json_valid(s.payload_json) AND typeof(json_extract(s.payload_json, '$.model')) = 'text'
+           THEN json_extract(s.payload_json, '$.model') END
+    ) AS model,
+    COALESCE(
+      CASE WHEN json_valid(s.payload_json) AND typeof(json_extract(s.payload_json, '$.modelSelection.instanceId')) = 'text'
+           THEN json_extract(s.payload_json, '$.modelSelection.instanceId') END,
+      s.provider_instance_id,
+      s.provider
+    ) AS instance_id
+  FROM orchestration_v2_projection_subagents s
+  WHERE s.status IN (${STATUS_LIST})
+    AND (
+      s.child_thread_id IS NULL
+      OR s.child_thread_id = ''
+      OR NOT EXISTS (
+        SELECT 1
+        FROM orchestration_v2_projection_runs r
+        WHERE r.thread_id = s.child_thread_id
+          AND r.status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
+          AND r.status <> 'waiting'
+      )
+    )
 `;
 
 const SUBAGENT_RUNS_SQL = `
@@ -275,14 +343,48 @@ const SUBAGENT_RUNS_SQL = `
     )
 `;
 
-const THREAD_AGENT_SQL = `
-  SELECT COUNT(DISTINCT n.thread_id) AS total
+const THREAD_AGENTS_LIST_SQL = `
+  SELECT DISTINCT
+    n.thread_id AS thread_id,
+    CASE WHEN json_valid(t.payload_json) AND typeof(json_extract(t.payload_json, '$.modelSelection.model')) = 'text'
+         THEN json_extract(t.payload_json, '$.modelSelection.model') END AS model,
+    CASE WHEN json_valid(t.payload_json) AND typeof(json_extract(t.payload_json, '$.modelSelection.instanceId')) = 'text'
+         THEN json_extract(t.payload_json, '$.modelSelection.instanceId') END AS instance_id
   FROM orchestration_v2_projection_nodes n
   INNER JOIN orchestration_v2_projection_threads t ON t.thread_id = n.thread_id
   WHERE n.kind = 'root_turn'
     AND n.status IN (${STATUS_LIST})
     AND t.deleted_at IS NULL
     AND t.archived_at IS NULL
+`;
+
+const SUBAGENT_NODES_FULL_SQL = `
+  SELECT
+    COALESCE(
+      CASE WHEN json_valid(s.payload_json) AND typeof(json_extract(s.payload_json, '$.modelSelection.model')) = 'text'
+           THEN json_extract(s.payload_json, '$.modelSelection.model') END,
+      CASE WHEN json_valid(s.payload_json) AND typeof(json_extract(s.payload_json, '$.model')) = 'text'
+           THEN json_extract(s.payload_json, '$.model') END
+    ) AS model,
+    COALESCE(
+      CASE WHEN json_valid(s.payload_json) AND typeof(json_extract(s.payload_json, '$.modelSelection.instanceId')) = 'text'
+           THEN json_extract(s.payload_json, '$.modelSelection.instanceId') END,
+      s.provider_instance_id,
+      s.provider
+    ) AS instance_id
+  FROM orchestration_v2_projection_subagents s
+  WHERE s.status IN (${STATUS_LIST})
+    AND (
+      s.child_thread_id IS NULL
+      OR s.child_thread_id = ''
+      OR NOT EXISTS (
+        SELECT 1
+        FROM orchestration_v2_projection_nodes n
+        WHERE n.thread_id = s.child_thread_id
+          AND n.kind = 'root_turn'
+          AND n.status IN (${STATUS_LIST})
+      )
+    )
 `;
 
 const SUBAGENT_SQL = `
@@ -322,6 +424,38 @@ function tryCountQuery(db: { prepare: (sql: string) => { get: () => any } }, sql
     const row = db.prepare(sql).get() as { total?: unknown } | undefined;
     const total = Number(row?.total || 0);
     return Number.isFinite(total) && total > 0 ? total : 0;
+  } catch (_) {
+    return null;
+  }
+}
+
+function tryAgentsQuery(
+  db: { prepare: (sql: string) => { all: () => any[] } },
+  sql: string,
+  dedupeByThread: boolean
+): T3WorkingAgent[] | null {
+  try {
+    const rows = db.prepare(sql).all() as Array<{
+      thread_id?: unknown;
+      model?: unknown;
+      instance_id?: unknown;
+    }>;
+    const agents: T3WorkingAgent[] = [];
+    const seenThreads = dedupeByThread ? new Set<string>() : null;
+    for (const row of rows) {
+      if (seenThreads) {
+        const tid = asText(row?.thread_id);
+        if (!tid || seenThreads.has(tid)) {
+          continue;
+        }
+        seenThreads.add(tid);
+      }
+      agents.push({
+        model: asModelId(row?.model),
+        instanceId: asText(row?.instance_id)
+      });
+    }
+    return agents;
   } catch (_) {
     return null;
   }
@@ -382,7 +516,7 @@ export function extractT3OptionEffort(options: unknown, fallbackRecord?: Record<
   return mergeEffortWithUltracode(effort, hasUltracode);
 }
 
-function readSnapshot(db: { prepare: (sql: string) => { get: () => any }; close: () => void }): T3DatabaseSnapshot {
+function readSnapshot(db: { prepare: (sql: string) => { get: () => any; all: () => any[] }; close: () => void }): T3DatabaseSnapshot {
   const row = db.prepare(MODEL_SQL).get() as {
     thread_id?: unknown;
     model?: unknown;
@@ -406,14 +540,24 @@ function readSnapshot(db: { prepare: (sql: string) => { get: () => any }; close:
   // Prefer the indexed `runs` table when present; fall back to `nodes` on
   // older schemas or minimal fixtures. A missing subagent table never drops
   // the model or the root-turn count.
-  const runThreads = tryCountQuery(db, RUNS_AGENT_SQL);
-  const threads = runThreads !== null ? runThreads : (tryCountQuery(db, THREAD_AGENT_SQL) ?? 0);
-  const extras = (runThreads !== null ? tryCountQuery(db, SUBAGENT_RUNS_SQL) : tryCountQuery(db, SUBAGENT_SQL)) ?? 0;
+  const runAgents = tryAgentsQuery(db, RUNS_AGENTS_FULL_SQL, true)
+    ?? tryAgentsQuery(db, RUNS_AGENTS_BASIC_SQL, true);
+  const usedRuns = runAgents !== null;
+  const threadAgents = runAgents ?? (tryAgentsQuery(db, THREAD_AGENTS_LIST_SQL, true) ?? []);
+  let extraAgents = usedRuns
+    ? tryAgentsQuery(db, SUBAGENT_RUNS_FULL_SQL, false)
+    : tryAgentsQuery(db, SUBAGENT_NODES_FULL_SQL, false);
+  if (extraAgents === null) {
+    const extraCount = (usedRuns ? tryCountQuery(db, SUBAGENT_RUNS_SQL) : tryCountQuery(db, SUBAGENT_SQL)) ?? 0;
+    extraAgents = Array.from({ length: extraCount }, () => ({ model: null, instanceId: null }));
+  }
+  const workingAgentModels = [...threadAgents, ...extraAgents];
   return {
     model,
     effort,
     instanceId,
-    workingAgents: threads + extras,
+    workingAgents: workingAgentModels.length,
+    ...(workingAgentModels.length > 0 ? { workingAgentModels } : {}),
     threadId: asText(row?.thread_id),
     seenAtMs: Number.isFinite(seenAtMs) ? seenAtMs : 0
   };
@@ -910,7 +1054,9 @@ export function readT3Presence(): T3PresenceSnapshot | null {
   const effort = selection ? (selection.effort ?? null) : (database?.effort ?? null);
   const instanceId = selection ? selection.instanceId : database?.instanceId ?? null;
   const workingAgents = database?.workingAgents ?? 0;
-  const cacheKey = `${source}\t${model}\t${effort || ''}\t${instanceId}\t${workingAgents}`;
+  const workingAgentModels = database?.workingAgentModels;
+  const agentsKey = workingAgentModels?.map((agent) => `${agent.instanceId || ''}:${agent.model || ''}`).join(',') || '';
+  const cacheKey = `${source}\t${model}\t${effort || ''}\t${instanceId}\t${workingAgents}\t${agentsKey}`;
   if (presenceCache && presenceCache.key === cacheKey) {
     return presenceCache.snapshot;
   }
@@ -918,7 +1064,8 @@ export function readT3Presence(): T3PresenceSnapshot | null {
     model,
     ...(effort ? { effort } : {}),
     instanceId,
-    workingAgents
+    workingAgents,
+    ...(workingAgentModels && workingAgentModels.length > 0 ? { workingAgentModels } : {})
   };
   presenceCache = { key: cacheKey, snapshot };
   return snapshot;

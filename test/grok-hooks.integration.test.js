@@ -6,10 +6,11 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-// Isolate Grok hooks config before loading the module so tests never touch ~/.grok.
+// Isolate Grok hooks config before loading the module so tests never touch ~/.grok or developer config.
 process.env.DISCORD_CODING_STATUS_GROK_HOOKS_DIR = fs.mkdtempSync(
   path.join(os.tmpdir(), 'grok-hooks-test-')
 );
+process.env.DISCORD_CODING_STATUS_SKIP_TOOL_HOOKS = 'false';
 
 const {
   GROK_HOOK_EVENTS,

@@ -15,6 +15,7 @@ import {
   CODEX_HOOKS_FILE,
   CODEX_HOOK_EVENTS,
   asRecord,
+  filterHookEvents,
   logError,
   powershellCommandLine,
   shellQuoteArg
@@ -137,7 +138,8 @@ export function installCodexHooks(scriptPath: string): HookInstallOutcome {
   const removed = removeManagedCodexHooks(config);
   let installed = 0;
 
-  for (const eventName of CODEX_HOOK_EVENTS) {
+  const activeEvents = filterHookEvents(CODEX_HOOK_EVENTS);
+  for (const eventName of activeEvents) {
     const groups = Array.isArray(hooks[eventName]) ? (hooks[eventName] as unknown[]) : [];
     groups.push({
       hooks: [
@@ -200,7 +202,7 @@ export function codexHooksStatus(): HookStatusOutcome {
     }
   }
 
-  const expected = [...CODEX_HOOK_EVENTS];
+  const expected = filterHookEvents(CODEX_HOOK_EVENTS);
   const expectedSet = new Set<string>(expected);
   const missingEvents = expected.filter((eventName) => !eventCounts[eventName]);
   const duplicateEvents = expected.filter((eventName) => (eventCounts[eventName] ?? 0) > 1);
@@ -222,7 +224,7 @@ export function codexHooksStatus(): HookStatusOutcome {
 export const codexHookInstaller: HookInstaller = {
   capability: 'codex',
   label: 'Codex',
-  events: CODEX_HOOK_EVENTS,
+  events: filterHookEvents(CODEX_HOOK_EVENTS),
   install: installCodexHooks,
   uninstall: uninstallCodexHooks,
   status: codexHooksStatus,

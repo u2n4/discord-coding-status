@@ -46,6 +46,8 @@ export interface ActiveTool extends ToolDefinition {
   projectName?: string | null;
   packageName?: string | null;
   claudeQuotaEligible?: boolean | null;
+  /** Claude Code / Codex hook sessions: the session transcript, re-read for live effort/model. */
+  transcriptPath?: string | null;
   title?: string | null;
   sessionCount?: number | null;
   /** True when several live processes matched this tool, so a per-process model cannot be proven. */

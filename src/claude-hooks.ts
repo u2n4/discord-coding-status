@@ -86,7 +86,10 @@ function directModelFromRecord(record: JsonRecord | null): string | null {
     return null;
   }
 
-  return normalizeClaudeModelId(record.model ?? record.model_id ?? record.modelId);
+  const model = normalizeClaudeModelId(record.model ?? record.model_id ?? record.modelId);
+  // Claude Code writes "<synthetic>" on assistant records it makes itself
+  // (interruptions, API errors); that is not a model.
+  return model && !/^<[^>]*>$/.test(model) ? model : null;
 }
 
 function normalizeSessionId(value: unknown): string | null {
@@ -276,6 +279,79 @@ export function readClaudeTranscriptMetadata(
 }
 
 let cachedClaudeSettingsEffort: { filePath: string; mtimeMs: number; effort: string | null } | null = null;
+
+interface CachedLiveTranscript {
+  mtimeMs: number;
+  size: number;
+  metadata: { model: string | null; effort: string | null };
+}
+
+const liveTranscriptCache = new Map<string, CachedLiveTranscript>();
+const LIVE_TRANSCRIPT_CACHE_LIMIT = 16;
+
+// Only a local, absolute transcript path is read in the background: a UNC
+// path (`\\host\share`, `//host/share`) would make Windows authenticate to
+// that host on every presence pass.
+export function isLocalTranscriptPath(transcriptPath: string): boolean {
+  if (process.platform === 'win32') {
+    return /^[A-Za-z]:[\\/]/.test(transcriptPath);
+  }
+  return /^\/(?!\/)/.test(transcriptPath);
+}
+
+/**
+ * Model and effort of a Claude Code session as its transcript reads now, for
+ * the daemon. Hooks read the transcript only when they fire, and with the
+ * per-tool hooks skipped (`skipToolHooks`) the next hook after a prompt is the
+ * turn's Stop: an `/effort` or `/model` change would stay stale for the whole
+ * turn. Returns null unless the transcript was written after `sinceMs` (the
+ * hook already read everything older). Parsed once per file version.
+ */
+export function readLiveClaudeTranscriptMetadata(
+  transcriptPath: unknown,
+  sinceMs: number,
+  options: ClaudeTranscriptReadOptions = {}
+): { model: string | null; effort: string | null } | null {
+  if (typeof transcriptPath !== 'string' || !transcriptPath.trim()) {
+    return null;
+  }
+  const filePath = transcriptPath.trim();
+  if (!isLocalTranscriptPath(filePath)) {
+    return null;
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (_) {
+    liveTranscriptCache.delete(filePath);
+    return null;
+  }
+  if (!stat.isFile() || !(stat.mtimeMs > sinceMs)) {
+    return null;
+  }
+  const cached = liveTranscriptCache.get(filePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.metadata;
+  }
+  const raw = readClaudeTranscriptMetadata(filePath, options);
+  // "default" is Claude Code's "use the account default" setting, not a model.
+  const metadata = {
+    model: raw.model && raw.model.toLowerCase() !== 'default' ? raw.model : null,
+    effort: raw.effort
+  };
+  if (liveTranscriptCache.size >= LIVE_TRANSCRIPT_CACHE_LIMIT && !liveTranscriptCache.has(filePath)) {
+    const oldest = liveTranscriptCache.keys().next().value;
+    if (oldest !== undefined) {
+      liveTranscriptCache.delete(oldest);
+    }
+  }
+  liveTranscriptCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, metadata });
+  return metadata;
+}
+
+export function resetLiveClaudeTranscriptCacheForTests(): void {
+  liveTranscriptCache.clear();
+}
 
 export function getClaudeSettingsFilePath(): string {
   const configured = String(process.env.CLAUDE_CONFIG_DIR || '').trim();

@@ -29,7 +29,8 @@ function createCodexEnvironment(t) {
   const { env } = createTestEnvironment(t, {
     HOME: root,
     USERPROFILE: root,
-    CODEX_HOME: codexHome
+    CODEX_HOME: codexHome,
+    DISCORD_CODING_STATUS_SKIP_TOOL_HOOKS: 'false'
   });
   return { codexHome, env, hooksFile: path.join(codexHome, 'hooks.json') };
 }

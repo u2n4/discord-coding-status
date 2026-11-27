@@ -102,6 +102,17 @@ export const CODEX_OAUTH_CLIENT_ID = envValue('DISCORD_CODING_STATUS_CODEX_OAUTH
 export const PLAN_TEXT_OVERRIDE = envValue('DISCORD_CODING_STATUS_PLAN_TEXT').trim().replace(/\\\$/g, '$');
 export const LIMITS_TEXT_OVERRIDE = envValue('DISCORD_CODING_STATUS_LIMITS_TEXT').trim();
 export const PREFER_CODEX_CLI = parseBoolean(envValue('DISCORD_CODING_STATUS_PREFER_CODEX_CLI'));
+export const SKIP_TOOL_HOOKS = parseBoolean(envValue('DISCORD_CODING_STATUS_SKIP_TOOL_HOOKS'));
+const PER_TOOL_HOOK_EVENTS = new Set(['PreToolUse', 'PostToolUse']);
+
+export function filterHookEvents(
+  events: readonly string[],
+  skipToolHooks: boolean = SKIP_TOOL_HOOKS
+): string[] {
+  return skipToolHooks
+    ? events.filter((eventName) => !PER_TOOL_HOOK_EVENTS.has(eventName))
+    : [...events];
+}
 export const ACTIVITY_STYLE = normalizeActivityStyle(
   envValue('DISCORD_CODING_STATUS_ACTIVITY_STYLE', DEFAULT_ACTIVITY_STYLE)
 );

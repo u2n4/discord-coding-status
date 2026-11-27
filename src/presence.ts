@@ -8,6 +8,7 @@ import {
   LARGE_IMAGE_KEY,
   SMALL_IMAGE_KEY,
   FALLBACK_CLIENT_ID,
+  MAX_PRESENCE_TEXT_LENGTH,
   RECONNECT_INTERVAL_MS,
   CONNECT_TIMEOUT_MS,
   execFileSyncString,
@@ -28,6 +29,7 @@ import {
   coerceStateTimestamp,
   debugLog,
   log,
+  readLiveCodexTurnMetadata,
   readStateFile
 } from './state-store';
 import {
@@ -41,7 +43,7 @@ import {
 import { discordApplicationForTool } from './providers/discord';
 import { readMuseExecModelForProcess, readMuseSettingsEffort, readMuseTuiModelForProcess } from './providers/muse/model';
 import { parseCodexCommandLine, readCodexConfiguredModel, readCodexDesktopModel } from './providers/codex/model';
-import { readClaudeSettingsEffort } from './claude-hooks';
+import { readClaudeSettingsEffort, readLiveClaudeTranscriptMetadata } from './claude-hooks';
 import { readGrokProcessModel, readGrokSessionSummaryModel } from './providers/grok/model';
 import { readOpenCodeModel } from './providers/opencode/model';
 import { readCursorModel } from './providers/cursor/model';
@@ -55,6 +57,7 @@ import { ensureAntigravityLiveLabels } from './providers/antigravity/live-labels
 import { displayModelLabel, formatModelWithEffort } from './providers/model-label';
 import { mergeEffortWithUltracode } from './core/presence/effort';
 import { readT3Presence, T3_VISIBLE_AGENT_MINIMUM } from './providers/t3/model';
+import type { T3WorkingAgent } from './providers/t3/model';
 import { DEFAULT_T3_IMAGE_KEY, DEFAULT_T3_NIGHTLY_IMAGE_KEY } from './providers/t3/provider';
 import { isT3NightlyProcess } from './core/detection/tool-detection';
 import type { ModelLabelSurface } from './providers/model-label';
@@ -299,7 +302,10 @@ export function toolFromSession(session: HookSessionState): ActiveTool {
       contextText: session.context || null,
       projectName: session.project || null,
       packageName: session.package || null,
-      claudeQuotaEligible: session.claude_quota_eligible ?? null
+      claudeQuotaEligible: session.claude_quota_eligible ?? null,
+      transcriptPath: typeof session.transcript_path === 'string' && session.transcript_path.trim()
+        ? session.transcript_path.trim()
+        : null
     };
   }
 
@@ -320,7 +326,10 @@ export function toolFromSession(session: HookSessionState): ActiveTool {
       effort: session.effort || null,
       contextText: session.context || null,
       projectName: session.project || null,
-      packageName: session.package || null
+      packageName: session.package || null,
+      transcriptPath: typeof session.transcript_path === 'string' && session.transcript_path.trim()
+        ? session.transcript_path.trim()
+        : null
     };
   }
 
@@ -493,7 +502,20 @@ export function claudeDesktopHostPid(proc: ProcessInfo, processes: ProcessInfo[]
  * (entrypoint "cli") is never consulted.
  */
 export function readDesktopHostedClaudeModel(desktopPid: number, processes: ProcessInfo[]): string | null {
-  const runners = processes.filter((proc) => proc.ppid === desktopPid
+  // Current Desktop builds start the runners from a Claude.exe helper (the
+  // `--type=utility` Node service) rather than from the main process, so a
+  // runner's parent is the Desktop process or one of its own same-binary children.
+  const exePath = (proc?: ProcessInfo) => String(proc?.executablePath || '').trim().toLowerCase();
+  const desktopExe = exePath(processes.find((proc) => proc.pid === desktopPid));
+  const hostPids = new Set<number>([desktopPid]);
+  if (desktopExe) {
+    for (const proc of processes) {
+      if (proc.ppid === desktopPid && exePath(proc) === desktopExe) {
+        hostPids.add(proc.pid);
+      }
+    }
+  }
+  const runners = processes.filter((proc) => typeof proc.ppid === 'number' && hostPids.has(proc.ppid)
     && /(?:^|[\\/])claude(?:\.exe)?$/i.test(String(proc.executablePath || '').trim())
     && /--output-format[=\s]+stream-json/.test(String(proc.commandLine || '')));
   if (!runners.length) {
@@ -712,6 +734,77 @@ function isVerifiedLiveProcess(info: ProcessInfo | undefined): boolean {
   }
 }
 
+export function formatT3WorkingAgentsState(
+  workingAgents: number,
+  agents: readonly T3WorkingAgent[] | undefined,
+  focusedModelLabel?: string | null
+): string {
+  if (workingAgents < T3_VISIBLE_AGENT_MINIMUM) {
+    return '';
+  }
+  const prefix = `${workingAgents} agents`;
+  if (!agents || agents.length === 0) {
+    return prefix;
+  }
+
+  const grouped = new Map<string, { label: string; count: number }>();
+  for (const agent of agents) {
+    if (!agent?.model) {
+      continue;
+    }
+    const label = displayModelLabel(
+      { family: 't3', providerId: agent.instanceId || undefined },
+      agent.model
+    ).trim();
+    if (!label) {
+      continue;
+    }
+    const key = label.toLowerCase();
+    const existing = grouped.get(key);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      grouped.set(key, { label, count: 1 });
+    }
+  }
+
+  if (grouped.size === 0) {
+    return prefix;
+  }
+
+  const focusedKey = focusedModelLabel ? focusedModelLabel.trim().toLowerCase() : '';
+  const entries = [...grouped.values()].sort((a, b) => {
+    if (b.count !== a.count) {
+      return b.count - a.count;
+    }
+    const aFocused = focusedKey && a.label.toLowerCase() === focusedKey ? 1 : 0;
+    const bFocused = focusedKey && b.label.toLowerCase() === focusedKey ? 1 : 0;
+    if (bFocused !== aFocused) {
+      return bFocused - aFocused;
+    }
+    return a.label.localeCompare(b.label);
+  });
+
+  const head = `${prefix} · `;
+  const chosen: string[] = [];
+  let length = head.length;
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    const token = entry.count > 1 ? `${entry.count}x ${entry.label}` : entry.label;
+    const sep = chosen.length > 0 ? ', ' : '';
+    const remainingCount = entries.slice(index + 1).reduce((sum, item) => sum + item.count, 0);
+    const overflowReserve = remainingCount > 0 ? `, +${remainingCount}`.length : 0;
+    if (chosen.length > 0 && length + sep.length + token.length + overflowReserve > MAX_PRESENCE_TEXT_LENGTH) {
+      const skippedCount = entries.slice(index).reduce((sum, item) => sum + item.count, 0);
+      return truncatePresenceText(`${head}${chosen.join(', ')}, +${skippedCount}`);
+    }
+    chosen.push(token);
+    length += sep.length + token.length;
+  }
+
+  return truncatePresenceText(`${head}${chosen.join(', ')}`);
+}
+
 export async function enrichToolForPresence(tool: ActiveTool | null): Promise<ActiveTool | null> {
   if (!tool) {
     return null;
@@ -720,9 +813,9 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
   // Minimal display contract: the Discord application identity already shows
   // the tool name ("Playing Codex"), and the published line is the model
   // (plus "(XHigh)", "(Max)", or "(Ultracode)" when one of those three high
-  // reasoning tiers is active). T3 Code also sends `N agents` as state when at
-  // least five agents are working. No activity, project, branch, quota,
-  // context, package, emoji, or timestamps are ever sent.
+  // reasoning tiers is active). T3 Code also sends `N agents · <models>` as
+  // state when at least three agents are working. No activity, project, branch,
+  // quota, context, package, emoji, or timestamps are ever sent.
   let model = modelTextForPresence(tool);
   let effort = effortTextForPresence(tool);
   let labelSurface: ModelLabelSurface | ActiveTool = tool;
@@ -745,6 +838,17 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
       }
     }
   } else if (tool.family === 'claude') {
+    if (tool.source === 'hook' && tool.transcriptPath) {
+      // The transcript written since the last hook names the turn's real
+      // model and effort; hooks alone lag a whole turn without per-tool hooks.
+      const live = readLiveClaudeTranscriptMetadata(tool.transcriptPath, updatedAtMs);
+      if (live?.model) {
+        model = truncatePresenceText(live.model);
+      }
+      if (live?.effort) {
+        effort = live.effort;
+      }
+    }
     if (!effort && tool.processInfo) {
       effort = parseClaudeCommandLineEffort(tool.processInfo.commandLine || tool.processInfo.line);
     }
@@ -765,6 +869,15 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
     } else {
       const configured = readCodexConfiguredModel();
       if (tool.source === 'hook') {
+        // The turn_context Codex wrote since the last hook names the running
+        // turn's model and effort (UserPromptSubmit fires before it exists).
+        const live = tool.transcriptPath ? readLiveCodexTurnMetadata(tool.transcriptPath, updatedAtMs) : null;
+        if (live?.model) {
+          model = truncatePresenceText(live.model);
+        }
+        if (live?.effort) {
+          effort = live.effort;
+        }
         if (configured?.model && (!model || (updatedAtMs > 0 && configured.mtimeMs > updatedAtMs))) {
           model = truncatePresenceText(configured.model);
         }
@@ -873,7 +986,8 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
     }
   } else if (tool.family === 't3') {
     // The thread on screen names the model and effort. A background thread that
-    // was never opened does not. Agent count is a second line, and only at 5 or more.
+    // was never opened does not. Working agents (with their proven models) show
+    // on the second line at 3 or more.
     const snapshot = readT3Presence();
     if (snapshot?.model) {
       model = truncatePresenceText(snapshot.model);
@@ -881,7 +995,8 @@ export async function enrichToolForPresence(tool: ActiveTool | null): Promise<Ac
       labelSurface = { family: 't3', providerId: snapshot.instanceId || undefined };
     }
     if (snapshot && snapshot.workingAgents >= T3_VISIBLE_AGENT_MINIMUM) {
-      state = `${snapshot.workingAgents} agents`;
+      const focusedLabel = model ? displayModelLabel(labelSurface, model) : null;
+      state = formatT3WorkingAgentsState(snapshot.workingAgents, snapshot.workingAgentModels, focusedLabel);
     }
   }
 

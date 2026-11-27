@@ -3,7 +3,7 @@
 import * as fs from 'node:fs';
 import type { HookCapability, HookInstaller, ToolProvider } from './core/providers/types';
 import type { SetupToolDetection } from './core/detection/types';
-import { CLAUDE_CONFIG_DIR, CLAUDE_SETTINGS_FILE, shellQuoteArg } from './env';
+import { CLAUDE_CONFIG_DIR, CLAUDE_SETTINGS_FILE, filterHookEvents, shellQuoteArg } from './env';
 import { readClaudeSettings } from './state-store';
 import {
   CLAUDE_LIFECYCLE_HOOK_EVENTS,
@@ -55,13 +55,16 @@ export function claudeHookCommand(scriptPath: string, event: string): string {
   ].join(' ');
 }
 
+const ACTIVE_CLAUDE_HOOK_EVENTS = filterHookEvents(CLAUDE_LIFECYCLE_HOOK_EVENTS);
+const ACTIVE_GROK_HOOK_EVENTS = filterHookEvents(GROK_HOOK_EVENTS);
+
 export const claudeHookInstaller: HookInstaller = {
   capability: 'claude',
   label: 'Claude Code',
-  events: CLAUDE_LIFECYCLE_HOOK_EVENTS,
+  events: ACTIVE_CLAUDE_HOOK_EVENTS,
   install: (scriptPath) => {
     const result = installManagedClaudeHooks(readClaudeSettings(), {
-      events: CLAUDE_LIFECYCLE_HOOK_EVENTS,
+      events: ACTIVE_CLAUDE_HOOK_EVENTS,
       commandForEvent: (eventName) => claudeHookCommand(scriptPath, eventName),
       timeout: CLAUDE_HOOK_TIMEOUT_SECONDS
     });
@@ -80,13 +83,13 @@ export const claudeHookInstaller: HookInstaller = {
     return { target: CLAUDE_SETTINGS_FILE, removed: result.removed };
   },
   status: () => {
-    const status = getManagedClaudeHookStatus(readClaudeSettings(), CLAUDE_LIFECYCLE_HOOK_EVENTS);
+    const status = getManagedClaudeHookStatus(readClaudeSettings(), ACTIVE_CLAUDE_HOOK_EVENTS);
     return {
       target: CLAUDE_SETTINGS_FILE,
       targetExists: fs.existsSync(CLAUDE_SETTINGS_FILE),
       installed: status.installed,
       managedCount: status.managedCount,
-      expectedEvents: CLAUDE_LIFECYCLE_HOOK_EVENTS,
+      expectedEvents: ACTIVE_CLAUDE_HOOK_EVENTS,
       missingEvents: status.missingEvents,
       duplicateEvents: status.duplicateEvents,
       unexpectedEvents: status.unexpectedEvents,
@@ -98,7 +101,7 @@ export const claudeHookInstaller: HookInstaller = {
 export const grokHookInstaller: HookInstaller = {
   capability: 'grok',
   label: 'Grok Code',
-  events: GROK_HOOK_EVENTS,
+  events: ACTIVE_GROK_HOOK_EVENTS,
   install: (scriptPath) => {
     const result = installManagedGrokHooks(scriptPath);
     return { target: result.hooksFile, installed: result.installed, removed: result.removed };
@@ -108,13 +111,13 @@ export const grokHookInstaller: HookInstaller = {
     return { target: result.hooksFile, removed: result.removed };
   },
   status: () => {
-    const status = getManagedGrokHookStatus();
+    const status = getManagedGrokHookStatus(ACTIVE_GROK_HOOK_EVENTS);
     return {
       target: GROK_HOOKS_FILE,
       targetExists: fs.existsSync(GROK_HOOKS_FILE),
       installed: status.installed,
       managedCount: status.managedCount,
-      expectedEvents: GROK_HOOK_EVENTS,
+      expectedEvents: ACTIVE_GROK_HOOK_EVENTS,
       missingEvents: status.missingEvents,
       duplicateEvents: status.duplicateEvents,
       unexpectedEvents: status.unexpectedEvents,

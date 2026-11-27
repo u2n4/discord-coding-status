@@ -26,8 +26,8 @@ Model: GPT-6.1 Sol
 That is all Discord ever sees: the tool's name and one model line, written the way the tool itself
 writes it (with `(XHigh)`, `(Max)`, or `(Ultracode)` appended only when one of those three highest
 effort levels is selected — lower levels stay hidden). No prompts, files, project names, branches,
-quotas or timers. T3 Code adds one extra line, `5 agents`, only while 5 or more agents are working.
-Fewer than that, and the line stays off.
+quotas or timers. T3 Code adds one extra line — `3 agents · <models>` — while 3 or more agents are working
+(falling back to `3 agents` if no model is proven). Fewer than 3, and the line stays off.
 
 It is not a Discord bot. It talks to the Discord Desktop app on your own computer, so there is no
 token, server or account to set up.

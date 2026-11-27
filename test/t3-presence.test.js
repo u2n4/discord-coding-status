@@ -349,7 +349,7 @@ test('with no visited T3 thread, the newest update names the model', { skip: !ha
   assert.equal(snapshot.instanceId, 'muse');
 });
 
-test('fewer than 5 working T3 agents stay hidden, and 5 or more are counted once', { skip: !hasSqlite && 'node:sqlite unavailable' }, async () => {
+test('fewer than 3 working T3 agents stay hidden, and 3 or more show count and models', { skip: !hasSqlite && 'node:sqlite unavailable' }, async () => {
   writeModelLists();
   const { db } = useDatabase('agents');
   addSubagents(db);
@@ -360,7 +360,7 @@ test('fewer than 5 working T3 agents stay hidden, and 5 or more are counted once
     lastVisitedAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z'
   });
-  for (let index = 1; index <= 4; index += 1) {
+  for (let index = 1; index <= 2; index += 1) {
     const id = `work-${index}`;
     addThread(db, {
       id,
@@ -395,7 +395,7 @@ test('fewer than 5 working T3 agents stay hidden, and 5 or more are counted once
 
   resetT3ModelCacheForTests();
   const hidden = readT3Presence();
-  assert.equal(hidden.workingAgents, 4);
+  assert.equal(hidden.workingAgents, 2);
   const quiet = await enrichToolForPresence(t3Tool());
   assert.equal(quiet.details, 'Model: Grok 4.7');
   assert.equal(quiet.state, '');
@@ -409,8 +409,80 @@ test('fewer than 5 working T3 agents stay hidden, and 5 or more are counted once
 
   const shown = await enrichToolForPresence(t3Tool());
   assert.equal(shown.details, 'Model: Grok 4.7');
-  assert.equal(shown.state, '5 agents');
-  assert.equal(buildPresence(shown).state, '5 agents');
+  assert.equal(shown.state, '3 agents · 2x Grok 4.7');
+  assert.equal(buildPresence(shown).state, '3 agents · 2x Grok 4.7');
+});
+
+test('3+ working T3 agents across mixed models list each model with grouping and focused-model priority', { skip: !hasSqlite && 'node:sqlite unavailable' }, async () => {
+  writeModelLists();
+  const { db } = useDatabase('mixed-agents');
+  db.exec(`
+    CREATE TABLE orchestration_v2_projection_runs (
+      thread_id TEXT,
+      ordinal INTEGER,
+      provider TEXT,
+      provider_instance_id TEXT,
+      status TEXT,
+      payload_json TEXT
+    );
+    CREATE TABLE orchestration_v2_projection_subagents (
+      status TEXT,
+      child_thread_id TEXT,
+      provider TEXT,
+      provider_instance_id TEXT,
+      payload_json TEXT
+    );
+  `);
+  addThread(db, {
+    id: 'main',
+    instanceId: 'antigravity',
+    model: 'gemini-4-neon',
+    lastVisitedAt: '2026-06-02T00:00:00.000Z',
+    updatedAt: '2026-06-02T00:00:00.000Z'
+  });
+  addThread(db, {
+    id: 'child-1',
+    instanceId: 'codex',
+    model: 'gpt-6.2-sol',
+    updatedAt: '2026-06-02T00:00:00.000Z'
+  });
+  addThread(db, {
+    id: 'child-2',
+    instanceId: 'claudeAgent',
+    model: 'claude-opus-5-5',
+    updatedAt: '2026-06-02T00:00:00.000Z'
+  });
+  db.prepare(`
+    INSERT INTO orchestration_v2_projection_runs (thread_id, ordinal, provider, provider_instance_id, status, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('main', 1, 'antigravity', 'antigravity', 'running', JSON.stringify({ modelSelection: { instanceId: 'antigravity', model: 'gemini-4-neon' } }));
+  db.prepare(`
+    INSERT INTO orchestration_v2_projection_runs (thread_id, ordinal, provider, provider_instance_id, status, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('child-1', 1, 'codex', 'codex', 'running', JSON.stringify({ modelSelection: { instanceId: 'codex', model: 'gpt-6.2-sol' } }));
+  db.prepare(`
+    INSERT INTO orchestration_v2_projection_runs (thread_id, ordinal, provider, provider_instance_id, status, payload_json)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run('child-2', 1, 'claudeAgent', 'claudeAgent', 'running', JSON.stringify({ modelSelection: { instanceId: 'claudeAgent', model: 'claude-opus-5-5' } }));
+  db.close();
+
+  resetT3ModelCacheForTests();
+  const threeMixed = await enrichToolForPresence(t3Tool());
+  assert.equal(threeMixed.details, 'Model: Gemini 4 Neon');
+  assert.equal(threeMixed.state, '3 agents · Gemini 4 Neon, GPT-6.2 Sol, Opus 5.5');
+
+  // Add an unthreaded Codex subagent so GPT-6.2 Sol becomes 2x (higher count sorts first)
+  const { DatabaseSync } = require('node:sqlite');
+  const db2 = new DatabaseSync(process.env.DISCORD_CODING_STATUS_T3_STATE_DB);
+  db2.prepare(`
+    INSERT INTO orchestration_v2_projection_subagents (status, child_thread_id, provider, provider_instance_id, payload_json)
+    VALUES (?, ?, ?, ?, ?)
+  `).run('running', null, 'codex', 'codex', JSON.stringify({ modelSelection: { instanceId: 'codex', model: 'gpt-6.2-sol' } }));
+  db2.close();
+
+  resetT3ModelCacheForTests();
+  const fourGrouped = await enrichToolForPresence(t3Tool());
+  assert.equal(fourGrouped.state, '4 agents · 2x GPT-6.2 Sol, Gemini 4 Neon, Opus 5.5');
 });
 
 test('a T3 model still shows when the subagent table is missing', { skip: !hasSqlite && 'node:sqlite unavailable' }, async () => {
@@ -423,7 +495,7 @@ test('a T3 model still shows when the subagent table is missing', { skip: !hasSq
     lastVisitedAt: '2026-06-01T00:00:00.000Z',
     updatedAt: '2026-06-01T00:00:00.000Z'
   });
-  for (let index = 1; index <= 5; index += 1) {
+  for (let index = 1; index <= 3; index += 1) {
     const id = `work-${index}`;
     addThread(db, {
       id,
@@ -437,15 +509,15 @@ test('a T3 model still shows when the subagent table is missing', { skip: !hasSq
 
   const snapshot = readT3Presence();
   assert.equal(snapshot.model, 'claude-opus-5-5');
-  assert.equal(snapshot.workingAgents, 5);
+  assert.equal(snapshot.workingAgents, 3);
   const enriched = await enrichToolForPresence(t3Tool());
   assert.equal(enriched.details, 'Model: Opus 5.5');
-  assert.equal(enriched.state, '5 agents');
+  assert.equal(enriched.state, '3 agents · 3x Opus 5.5');
 });
 
-test('five working T3 agents still count when no model can be proven', { skip: !hasSqlite && 'node:sqlite unavailable' }, async () => {
+test('three working T3 agents still count when no model can be proven', { skip: !hasSqlite && 'node:sqlite unavailable' }, async () => {
   const { db } = useDatabase('count-only');
-  for (let index = 1; index <= 5; index += 1) {
+  for (let index = 1; index <= 3; index += 1) {
     const id = `work-${index}`;
     addThread(db, {
       id,
@@ -459,10 +531,10 @@ test('five working T3 agents still count when no model can be proven', { skip: !
 
   const snapshot = readT3Presence();
   assert.equal(snapshot.model, null);
-  assert.equal(snapshot.workingAgents, 5);
+  assert.equal(snapshot.workingAgents, 3);
   const enriched = await enrichToolForPresence(t3Tool());
   assert.equal(enriched.details, '');
-  assert.equal(enriched.state, '5 agents');
+  assert.equal(enriched.state, '3 agents');
 });
 
 test('a locked or broken T3 database keeps the last proven snapshot', { skip: !hasSqlite && 'node:sqlite unavailable' }, () => {

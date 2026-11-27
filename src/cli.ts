@@ -523,6 +523,7 @@ function compactConfigEntries(entries: Record<string, string>): Record<string, s
     entries.DISCORD_CODING_STATUS_PREFER_CODEX_CLI,
     'false'
   );
+  setConfigBooleanIfCustom(next, entries, 'DISCORD_CODING_STATUS_SKIP_TOOL_HOOKS', false);
 
   setConfigBooleanIfCustom(next, entries, 'DISCORD_CODING_STATUS_SHOW_ACTIVITY', displayDefaults.activity);
   setConfigBooleanIfCustom(next, entries, 'DISCORD_CODING_STATUS_SHOW_PROJECT', displayDefaults.project);

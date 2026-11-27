@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { powershellCommandLine, shellQuoteArg } from './env';
+import { filterHookEvents, powershellCommandLine, shellQuoteArg } from './env';
 import { envPathValue, resolveHomePath } from './commands/config/settings';
 import { getArgString } from './commands/args';
 import { findStringDeep, readHookInput } from './state-store';
@@ -131,8 +131,9 @@ export function installManagedGrokHooks(scriptPath: string): ManagedGrokHookMuta
   const previous = readGrokHooksFile();
   const removed = countManagedGrokHooks(previous);
 
+  const activeEvents = filterHookEvents(GROK_HOOK_EVENTS);
   const hooks: JsonRecord = {};
-  for (const eventName of GROK_HOOK_EVENTS) {
+  for (const eventName of activeEvents) {
     hooks[eventName] = [
       {
         hooks: [
@@ -152,7 +153,7 @@ export function installManagedGrokHooks(scriptPath: string): ManagedGrokHookMuta
 
   return {
     hooksFile: GROK_HOOKS_FILE,
-    installed: GROK_HOOK_EVENTS.length,
+    installed: activeEvents.length,
     removed
   };
 }
@@ -171,7 +172,7 @@ export function removeManagedGrokHooks(): ManagedGrokHookRemoval {
 }
 
 export function getManagedGrokHookStatus(
-  expectedEvents: readonly string[] = GROK_HOOK_EVENTS
+  expectedEvents: readonly string[] = filterHookEvents(GROK_HOOK_EVENTS)
 ): ManagedGrokHookStatus {
   if (!fs.existsSync(GROK_HOOKS_FILE)) {
     const allMissing = [...expectedEvents];

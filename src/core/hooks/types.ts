@@ -22,6 +22,12 @@ export interface HookSessionState {
    */
   claude_entrypoint?: string;
   /**
+   * Claude Code transcript / Codex rollout (JSONL) the hook was given, so the
+   * daemon can follow an effort/model change between hooks (per-tool hooks may
+   * be skipped).
+   */
+  transcript_path?: string;
+  /**
    * Native Muse hook binding: PID + creation time (Unix ms) of the owning
    * Muse process, derived from the receiver's own ancestor chain. Absent on
    * manual/unbound sessions; a dead PID or creation mismatch invalidates.

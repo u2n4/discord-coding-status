@@ -23,6 +23,7 @@ import {
   extractClaudeEffortFromHookInput,
   extractClaudeModelFromHookInput,
   extractClaudeSessionId,
+  isLocalTranscriptPath,
   readClaudeTranscriptMetadata
 } from './claude-hooks';
 import {
@@ -249,13 +250,33 @@ export function findStringDeep(value: unknown, keys: string[], depth = 0): strin
 }
 
 // The rollout's first line is session_meta; payload.source is "exec" for a
-// headless `codex exec` run (also "cli", "vscode", ...). That line carries the
-// full base instructions, so it is read whole (in chunks, up to a cap).
+// headless `codex exec` run (also "cli", "vscode", ...), and payload.originator
+// names the host ("codex_cli_rs", "Codex Desktop", "T3 Code", ...). That line
+// carries the full base instructions, so it is read whole (in chunks, up to a cap).
 const CODEX_SESSION_META_MAX_BYTES = 8 * 1024 * 1024;
 
 export function readCodexSessionSource(transcriptPath: string | null): string | null {
+  return readCodexSessionMeta(transcriptPath).source;
+}
+
+// A Codex turn that T3 Code runs through `codex app-server` is shown as T3
+// Code (its thread names model and effort). T3 does not hand the app-server
+// its thread environment, so only the rollout's originator identifies it.
+export function isT3HostedCodexOriginator(originator: string | null): boolean {
+  return typeof originator === 'string' && /^t3(?:[\s_-]?code)?(?:\b|$)/i.test(originator.trim());
+}
+
+export function codexHookSurfaceFromSessionMeta(meta: { source: string | null; originator: string | null }): string {
+  if (meta.source === 'exec') {
+    return 'exec';
+  }
+  return isT3HostedCodexOriginator(meta.originator) ? 't3' : 'cli';
+}
+
+export function readCodexSessionMeta(transcriptPath: string | null): { source: string | null; originator: string | null } {
+  const unknown = { source: null, originator: null };
   if (!transcriptPath) {
-    return null;
+    return unknown;
   }
   let fd: number | null = null;
   try {
@@ -276,11 +297,18 @@ export function readCodexSessionSource(transcriptPath: string | null): string | 
       total += read;
     }
     const head = Buffer.concat(chunks);
-    const first = JSON.parse(head.subarray(0, lineEnd === -1 ? head.length : lineEnd).toString('utf8')) as { type?: unknown; payload?: { source?: unknown } };
-    const source = first?.type === 'session_meta' ? first.payload?.source : null;
-    return typeof source === 'string' && source.trim() ? source.trim().toLowerCase() : null;
+    const first = JSON.parse(head.subarray(0, lineEnd === -1 ? head.length : lineEnd).toString('utf8')) as { type?: unknown; payload?: { source?: unknown; originator?: unknown } };
+    if (first?.type !== 'session_meta') {
+      return unknown;
+    }
+    const source = first.payload?.source;
+    const originator = first.payload?.originator;
+    return {
+      source: typeof source === 'string' && source.trim() ? source.trim().toLowerCase() : null,
+      originator: typeof originator === 'string' && originator.trim() ? originator.trim() : null
+    };
   } catch (_) {
-    return null;
+    return unknown;
   } finally {
     if (fd !== null) {
       try {
@@ -363,6 +391,51 @@ export function readCodexTurnMetadata(transcriptPath: string | null): { model: s
   }
 
   return unavailable;
+}
+
+const liveCodexTurnCache = new Map<string, { mtimeMs: number; size: number; metadata: { model: string | null; effort: string | null } }>();
+const LIVE_CODEX_TURN_CACHE_LIMIT = 16;
+
+/**
+ * The newest `turn_context` of a Codex rollout written after `sinceMs`, for
+ * the daemon. UserPromptSubmit fires before Codex records the new turn's
+ * context, so with the per-tool hooks skipped the hook value would lag a whole
+ * turn behind a `/model` or effort change. Null when nothing newer exists.
+ */
+export function readLiveCodexTurnMetadata(
+  transcriptPath: string | null | undefined,
+  sinceMs: number
+): { model: string | null; effort: string | null } | null {
+  if (typeof transcriptPath !== 'string' || !transcriptPath.trim()) {
+    return null;
+  }
+  const filePath = path.resolve(resolveHomePath(transcriptPath.trim()));
+  if (!isLocalTranscriptPath(filePath)) {
+    return null;
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (_) {
+    liveCodexTurnCache.delete(filePath);
+    return null;
+  }
+  if (!stat.isFile() || !(stat.mtimeMs > sinceMs)) {
+    return null;
+  }
+  const cached = liveCodexTurnCache.get(filePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.metadata;
+  }
+  const metadata = readCodexTurnMetadata(filePath);
+  if (liveCodexTurnCache.size >= LIVE_CODEX_TURN_CACHE_LIMIT && !liveCodexTurnCache.has(filePath)) {
+    const oldest = liveCodexTurnCache.keys().next().value;
+    if (oldest !== undefined) {
+      liveCodexTurnCache.delete(oldest);
+    }
+  }
+  liveCodexTurnCache.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size, metadata });
+  return metadata;
 }
 
 export function safeCommandSummary(command: string | null): string | null {
@@ -733,8 +806,9 @@ export function codexHookSessionFromArgs(args: Record<string, string | boolean>)
 
   return {
     tool: 'codex',
-    // A headless `codex exec` run (scripts, agents) is nobody's screen.
-    surface: getArgString(args, 'surface') || (readCodexSessionSource(transcriptPath) === 'exec' ? 'exec' : 'cli'),
+    // A headless `codex exec` run (scripts, agents) is nobody's screen, and a
+    // T3-hosted turn is shown as T3 Code itself.
+    surface: getArgString(args, 'surface') || codexHookSurfaceFromSessionMeta(readCodexSessionMeta(transcriptPath)),
     status,
     session_id: sessionId,
     cwd,
@@ -752,7 +826,8 @@ export function codexHookSessionFromArgs(args: Record<string, string | boolean>)
       || findStringDeep(input, ['effort', 'reasoning_effort', 'reasoningEffort', 'model_reasoning_effort', 'modelReasoningEffort'])
       || turnMetadata.effort
       || undefined,
-    context: getArgString(args, 'context') || findStringDeep(input, ['context', 'context_used', 'contextUsed']) || undefined
+    context: getArgString(args, 'context') || findStringDeep(input, ['context', 'context_used', 'contextUsed']) || undefined,
+    transcript_path: transcriptPath || undefined
   };
 }
 
@@ -825,7 +900,8 @@ export function claudeHookSessionFromArgs(args: Record<string, string | boolean>
     effort,
     context: getArgString(args, 'context') || undefined,
     claude_quota_eligible: eligibility.eligible,
-    claude_entrypoint: normalizeClaudeEntrypoint(process.env.CLAUDE_CODE_ENTRYPOINT)
+    claude_entrypoint: normalizeClaudeEntrypoint(process.env.CLAUDE_CODE_ENTRYPOINT),
+    transcript_path: transcriptPath || undefined
   };
 }
 

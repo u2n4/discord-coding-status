@@ -223,7 +223,7 @@ test('T3 Code shows XHigh, Max, and Ultracode from SQLite options, hides lower t
     assert.equal(enriched.details, 'Model: Gemini 4 Neon (XHigh)');
     assert.equal(enriched.state, '');
 
-    // Claude ultracode boolean combines with visible effort (xhigh/max) + 5 active agents stay in state
+    // Claude ultracode boolean combines with visible effort (xhigh/max) + 5 active agents with models stay in state
     db.prepare('INSERT INTO orchestration_v2_projection_nodes (thread_id, kind, status) VALUES (?, ?, ?)').run('t1', 'root_turn', 'running');
     for (let i = 0; i < 4; i += 1) {
       db.prepare('INSERT INTO orchestration_v2_projection_nodes (thread_id, kind, status) VALUES (?, ?, ?)').run(`worker-${i}`, 'root_turn', 'running');
@@ -235,7 +235,7 @@ test('T3 Code shows XHigh, Max, and Ultracode from SQLite options, hides lower t
     }, '2026-11-27T01:01:00.000Z', 4);
     enriched = await enrichToolForPresence(t3Tool);
     assert.equal(enriched.details, 'Model: Opus 5.5 (XHigh · Ultracode)');
-    assert.equal(enriched.state, '5 agents');
+    assert.equal(enriched.state, '5 agents · 5x Opus 5.5');
 
     // Claude ultracode + high hides high and shows only (Ultracode)
     setThread({
